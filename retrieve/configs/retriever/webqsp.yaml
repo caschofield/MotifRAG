@@ -21,6 +21,6 @@ eval:
   k_list: '100'
 
 train:
-  num_epochs: 10000
-  patience: 10
+  num_epochs: 50
+  patience: 5
   save_prefix: 'webqsp'

@@ -14,7 +14,8 @@ class GTELargeEN:
             model_path,
             trust_remote_code=True,
             unpad_inputs=True,
-            use_memory_efficient_attention=True).to(device)
+            use_memory_efficient_attention=False,
+            attn_implementation="sdpa").to(device)
         self.normalize = normalize
 
     @torch.no_grad()
