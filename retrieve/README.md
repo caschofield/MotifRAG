@@ -45,6 +45,26 @@ where `D` should be a dataset mentioned in ["Supported Datasets"](#supported-dat
 
 We now train a retriever, employ it for retrieval (inference), and evaluate the retrieval results.
 
+### Motif-Aware Retrieval (Subgraph RAG 2.0)
+
+The retriever now supports motif-driven tokenization with directed 3-node motifs (triads).
+
+- Motif cache files are saved under `data_files/{dataset}/motif_tokens/`.
+- Motif support is configured in `configs/retriever/{dataset}.yaml` via:
+  - `motif.enabled`
+  - `motif.backend` (`python` by default)
+  - `motif.top_k_tokens` (`4` by default)
+  - `motif.motif_emb_dim` (`64` by default)
+- Optional ORCA integration is scaffolded through `motif.backend=orca` and `motif.orca_path`.
+  If unavailable, the code falls back to the Python implementation.
+- Retrieval outputs keep backward compatibility and append:
+  - `scored_triple_motif_tokens`
+  - `target_relevant_triple_motif_tokens`
+- Evaluation now additionally reports:
+  - `motif_recall@k`
+  - `motif_precision@k`
+  - `motif_f1@k`
+
 ### Installation
 
 ```bash

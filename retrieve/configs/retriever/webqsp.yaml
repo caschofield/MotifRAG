@@ -10,9 +10,21 @@ dataset:
 
 retriever:
   topic_pe: true
+  hidden_dim: 256
   DDE_kwargs:
     num_rounds: 2
     num_reverse_rounds: 2
+
+motif:
+  enabled: true
+  backend: 'python'
+  orca_path: ''
+  top_k_tokens: 4
+  motif_emb_dim: 64
+  vocab_size: 17
+
+loss:
+  motif_kl_weight: 0.1
 
 optimizer:
   lr: 1e-3

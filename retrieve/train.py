@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from src.config.retriever import load_yaml
 from src.dataset.retriever import RetrieverDataset, collate_retriever
+from src.dataset.motifs import MOTIF_VOCAB_SIZE
 from src.model.retriever import Retriever
 from src.setup import set_seed, prepare_sample
 
@@ -25,11 +26,14 @@ def eval_epoch(config, device, data_loader, model):
     for sample in tqdm(data_loader):
         h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,\
         num_non_text_entities, relation_embs, topic_entity_one_hot,\
-        target_triple_probs, a_entity_id_list = prepare_sample(device, sample)
+        target_triple_probs, a_entity_id_list, node_motif_token_ids,\
+        node_motif_token_wts, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
 
         pred_triple_logits = model(
             h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,
-            num_non_text_entities, relation_embs, topic_entity_one_hot).reshape(-1)
+            num_non_text_entities, relation_embs, topic_entity_one_hot,
+            node_motif_token_ids, node_motif_token_wts,
+            triple_motif_token_ids, triple_motif_token_wts).reshape(-1)
         
         # Triple ranking
         sorted_triple_ids_pred = torch.argsort(
@@ -64,33 +68,102 @@ def eval_epoch(config, device, data_loader, model):
     
     return metric_dict
 
+
+def get_motif_dist(triple_scores, triple_motif_token_ids, triple_motif_token_wts, vocab_size, eps=1e-8):
+    coeff = triple_scores.unsqueeze(-1).expand_as(triple_motif_token_wts)
+    values = (coeff * triple_motif_token_wts).reshape(-1)
+    ids = triple_motif_token_ids.reshape(-1)
+    motif_mass = torch.zeros(vocab_size, device=triple_scores.device)
+    motif_mass = motif_mass.scatter_add(0, ids, values)
+    motif_mass[0] = 0.0
+    norm = motif_mass.sum()
+    if norm <= eps:
+        return None
+    return motif_mass / norm
+
 def train_epoch(device, train_loader, model, optimizer):
     model.train()
     epoch_loss = 0
+    epoch_loss_bce = 0
+    epoch_loss_kl = 0
+    gate_sum = None
+    gate_cnt = 0
+    motif_kl_weight = model.motif_cfg.get('motif_kl_weight', 0.1) if model.motif_enabled else 0.0
+    motif_vocab_size = model.motif_cfg.get('vocab_size', MOTIF_VOCAB_SIZE) if model.motif_enabled else MOTIF_VOCAB_SIZE
+
     for sample in tqdm(train_loader):
         h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,\
         num_non_text_entities, relation_embs, topic_entity_one_hot,\
-        target_triple_probs, a_entity_id_list = prepare_sample(device, sample)
+        target_triple_probs, a_entity_id_list, node_motif_token_ids,\
+        node_motif_token_wts, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
             
         if len(h_id_tensor) == 0:
             continue
 
-        pred_triple_logits = model(
+        model_out = model(
             h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,
-            num_non_text_entities, relation_embs, topic_entity_one_hot)
+            num_non_text_entities, relation_embs, topic_entity_one_hot,
+            node_motif_token_ids, node_motif_token_wts,
+            triple_motif_token_ids, triple_motif_token_wts,
+            return_aux=True)
+        if isinstance(model_out, tuple):
+            pred_triple_logits, aux = model_out
+        else:
+            pred_triple_logits = model_out
+            aux = {}
+
         target_triple_probs = target_triple_probs.to(device).unsqueeze(-1)
-        loss = F.binary_cross_entropy_with_logits(
+        loss_bce = F.binary_cross_entropy_with_logits(
             pred_triple_logits, target_triple_probs)
+        loss_kl = torch.tensor(0.0, device=device)
+
+        if model.motif_enabled and motif_kl_weight > 0:
+            pred_probs = torch.sigmoid(pred_triple_logits).reshape(-1)
+            target_probs = target_triple_probs.reshape(-1)
+            target_dist = get_motif_dist(
+                target_probs,
+                triple_motif_token_ids,
+                triple_motif_token_wts,
+                motif_vocab_size,
+            )
+            pred_dist = get_motif_dist(
+                pred_probs,
+                triple_motif_token_ids,
+                triple_motif_token_wts,
+                motif_vocab_size,
+            )
+            if (target_dist is not None) and (pred_dist is not None):
+                loss_kl = F.kl_div(torch.log(pred_dist + 1e-8), target_dist, reduction='batchmean')
+
+        loss = loss_bce + motif_kl_weight * loss_kl
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
-        loss = loss.item()
-        epoch_loss += loss
+        epoch_loss += loss.item()
+        epoch_loss_bce += loss_bce.item()
+        epoch_loss_kl += loss_kl.item()
+        gate = aux.get('gate', None)
+        if gate is not None:
+            gate_sum = gate if gate_sum is None else gate_sum + gate
+            gate_cnt += 1
     
     epoch_loss /= len(train_loader)
+    epoch_loss_bce /= len(train_loader)
+    epoch_loss_kl /= len(train_loader)
     
-    log_dict = {'loss': epoch_loss}
+    log_dict = {
+        'loss': epoch_loss,
+        'loss_bce': epoch_loss_bce,
+        'loss_motif_kl': epoch_loss_kl,
+    }
+    if gate_sum is not None and gate_cnt > 0:
+        gate_mean = (gate_sum / gate_cnt).detach().cpu().tolist()
+        log_dict.update({
+            'gate_neighborhood': gate_mean[0],
+            'gate_position': gate_mean[1],
+            'gate_structure': gate_mean[2],
+        })
     return log_dict
 
 def main(args):
@@ -122,7 +195,11 @@ def main(args):
         val_set, batch_size=1, collate_fn=collate_retriever)
     
     emb_size = train_set[0]['q_emb'].shape[-1]
-    model = Retriever(emb_size, **config['retriever']).to(device)
+    motif_cfg = config.get('motif', {})
+    if 'vocab_size' not in motif_cfg:
+        motif_cfg['vocab_size'] = MOTIF_VOCAB_SIZE
+    motif_cfg['motif_kl_weight'] = config.get('loss', {}).get('motif_kl_weight', 0.1)
+    model = Retriever(emb_size, motif=motif_cfg, **config['retriever']).to(device)
     optimizer = Adam(model.parameters(), **config['optimizer'])
 
     num_patient_epochs = 0

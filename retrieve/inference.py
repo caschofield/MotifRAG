@@ -3,6 +3,7 @@ import torch
 
 from tqdm import tqdm
 
+from src.dataset.motifs import MOTIF_VOCAB_SIZE
 from src.dataset.retriever import RetrieverDataset, collate_retriever
 from src.model.retriever import Retriever
 from src.setup import set_seed, prepare_sample
@@ -20,7 +21,10 @@ def main(args):
         config=config, split='test', skip_no_path=False)
     
     emb_size = infer_set[0]['q_emb'].shape[-1]
-    model = Retriever(emb_size, **config['retriever']).to(device)
+    motif_cfg = config.get('motif', {})
+    if 'vocab_size' not in motif_cfg:
+        motif_cfg['vocab_size'] = MOTIF_VOCAB_SIZE
+    model = Retriever(emb_size, motif=motif_cfg, **config['retriever']).to(device)
     model.load_state_dict(cpt['model_state_dict'])
     model = model.to(device)
     model.eval()
@@ -31,17 +35,22 @@ def main(args):
         sample = collate_retriever([raw_sample])
         h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,\
             num_non_text_entities, relation_embs, topic_entity_one_hot,\
-            target_triple_probs, a_entity_id_list = prepare_sample(device, sample)
+            target_triple_probs, a_entity_id_list, node_motif_token_ids,\
+            node_motif_token_wts, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
 
         entity_list = raw_sample['text_entity_list'] + raw_sample['non_text_entity_list']
         relation_list = raw_sample['relation_list']
         top_K_triples = []
         target_relevant_triples = []
+        scored_triple_motif_tokens = []
+        target_relevant_triple_motif_tokens = []
 
         if len(h_id_tensor) != 0:
             pred_triple_logits = model(
                 h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,
-                num_non_text_entities, relation_embs, topic_entity_one_hot)
+                num_non_text_entities, relation_embs, topic_entity_one_hot,
+                node_motif_token_ids, node_motif_token_wts,
+                triple_motif_token_ids, triple_motif_token_wts)
             pred_triple_scores = torch.sigmoid(pred_triple_logits).reshape(-1)
             top_K_results = torch.topk(pred_triple_scores, 
                                        min(args.max_K, len(pred_triple_scores)))
@@ -55,6 +64,10 @@ def main(args):
                     entity_list[t_id_tensor[triple_id].item()],
                     top_K_scores[j]
                 ))
+                scored_triple_motif_tokens.append({
+                    'ids': triple_motif_token_ids[triple_id].cpu().tolist(),
+                    'wts': triple_motif_token_wts[triple_id].cpu().tolist(),
+                })
 
             target_relevant_triple_ids = raw_sample['target_triple_probs'].nonzero().reshape(-1).tolist()
             for triple_id in target_relevant_triple_ids:
@@ -63,6 +76,10 @@ def main(args):
                     relation_list[r_id_tensor[triple_id].item()],
                     entity_list[t_id_tensor[triple_id].item()],
                 ))
+                target_relevant_triple_motif_tokens.append({
+                    'ids': triple_motif_token_ids[triple_id].cpu().tolist(),
+                    'wts': triple_motif_token_wts[triple_id].cpu().tolist(),
+                })
 
         sample_dict = {
             'question': raw_sample['question'],
@@ -72,7 +89,9 @@ def main(args):
             'a_entity': raw_sample['a_entity'],
             'a_entity_in_graph': [entity_list[e_id] for e_id in raw_sample['a_entity_id_list']],
             'max_path_length': raw_sample['max_path_length'],
-            'target_relevant_triples': target_relevant_triples
+            'target_relevant_triples': target_relevant_triples,
+            'scored_triple_motif_tokens': scored_triple_motif_tokens,
+            'target_relevant_triple_motif_tokens': target_relevant_triple_motif_tokens,
         }
         
         pred_dict[raw_sample['id']] = sample_dict

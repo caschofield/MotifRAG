@@ -7,6 +7,8 @@ import torch.nn.functional as F
 
 from tqdm import tqdm
 
+from .motifs import load_or_build_motif_cache
+
 class RetrieverDataset:
     def __init__(
         self,
@@ -23,13 +25,33 @@ class RetrieverDataset:
         triple_score_dict = self._get_triple_scores(
             dataset_name, split, processed_dict_list)
 
+        motif_cfg = config.get('motif', {})
+        motif_enabled = motif_cfg.get('enabled', False)
+        if motif_enabled:
+            motif_dict = load_or_build_motif_cache(
+                dataset_name=dataset_name,
+                split=split,
+                processed_dict_list=processed_dict_list,
+                top_k=motif_cfg.get('top_k_tokens', 4),
+                backend=motif_cfg.get('backend', 'python'),
+                orca_path=motif_cfg.get('orca_path', ''),
+            )
+        else:
+            motif_dict = None
+
         # Load pre-computed embeddings.
         emb_dict = self._load_emb(
             dataset_name, config['dataset']['text_encoder_name'], split)
 
         # Put everything together.
         self._assembly(
-            processed_dict_list, triple_score_dict, emb_dict, skip_no_path)
+            processed_dict_list,
+            triple_score_dict,
+            motif_dict,
+            emb_dict,
+            skip_no_path,
+            motif_cfg.get('top_k_tokens', 4),
+        )
 
     def _load_processed(
         self,
@@ -191,8 +213,10 @@ class RetrieverDataset:
         self,
         processed_dict_list,
         triple_score_dict,
+        motif_dict,
         emb_dict,
         skip_no_path,
+        top_k_motif_tokens,
     ):
         self.processed_dict_list = []
 
@@ -218,11 +242,24 @@ class RetrieverDataset:
 
             sample_i.update(emb_dict[sample_i_id])
 
+            num_entities_i = len(sample_i['text_entity_list']) + len(sample_i['non_text_entity_list'])
+            num_triples_i = len(sample_i['h_id_list'])
+            if motif_dict is not None and sample_i_id in motif_dict:
+                sample_i.update(motif_dict[sample_i_id])
+            else:
+                sample_i['node_motif_token_ids'] = torch.zeros(
+                    (num_entities_i, top_k_motif_tokens), dtype=torch.long)
+                sample_i['node_motif_token_wts'] = torch.zeros(
+                    (num_entities_i, top_k_motif_tokens), dtype=torch.float)
+                sample_i['triple_motif_token_ids'] = torch.zeros(
+                    (num_triples_i, top_k_motif_tokens), dtype=torch.long)
+                sample_i['triple_motif_token_wts'] = torch.zeros(
+                    (num_triples_i, top_k_motif_tokens), dtype=torch.float)
+
             sample_i['a_entity'] = list(set(sample_i['a_entity']))
             sample_i['a_entity_id_list'] = list(set(sample_i['a_entity_id_list']))
 
             # PE for topic entities.
-            num_entities_i = len(sample_i['text_entity_list']) + len(sample_i['non_text_entity_list'])
             topic_entity_mask = torch.zeros(num_entities_i)
             topic_entity_mask[sample_i['q_entity_id_list']] = 1.
             topic_entity_one_hot = F.one_hot(topic_entity_mask.long(), num_classes=2)
@@ -256,7 +293,9 @@ def collate_retriever(data):
     t_id_tensor = torch.tensor(t_id_list)
     
     num_non_text_entities = len(sample['non_text_entity_list'])
-    
+
     return h_id_tensor, r_id_tensor, t_id_tensor, sample['q_emb'],\
         sample['entity_embs'], num_non_text_entities, sample['relation_embs'],\
-        sample['topic_entity_one_hot'], sample['target_triple_probs'], sample['a_entity_id_list']
+        sample['topic_entity_one_hot'], sample['target_triple_probs'], sample['a_entity_id_list'],\
+        sample['node_motif_token_ids'], sample['node_motif_token_wts'],\
+        sample['triple_motif_token_ids'], sample['triple_motif_token_wts']

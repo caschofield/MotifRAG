@@ -14,6 +14,20 @@ class DDEYaml(pydantic.BaseModel):
 class RetrieverYaml(pydantic.BaseModel):
     topic_pe: bool
     DDE_kwargs: DDEYaml
+    hidden_dim: int = 256
+
+
+class MotifYaml(pydantic.BaseModel):
+    enabled: bool = True
+    backend: str = 'python'
+    orca_path: str = ''
+    top_k_tokens: int = 4
+    motif_emb_dim: int = 64
+    vocab_size: int = 17
+
+
+class LossYaml(pydantic.BaseModel):
+    motif_kl_weight: float = 0.1
 
 class OptimizerYaml(pydantic.BaseModel):
     lr: float
@@ -30,6 +44,8 @@ class RetrieverTrainYaml(pydantic.BaseModel):
     env: EnvYaml
     dataset: DatasetYaml
     retriever: RetrieverYaml
+    motif: MotifYaml = MotifYaml()
+    loss: LossYaml = LossYaml()
     optimizer: OptimizerYaml
     eval: EvalYaml
     train: RetrieverExpYaml
