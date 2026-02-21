@@ -2,6 +2,7 @@ import os
 import pickle
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
 from typing import Dict, List, Tuple
 
 import networkx as nx
@@ -181,6 +182,19 @@ def _build_single(args):
     )
 
 
+def _worker_init():
+    # Prevent thread oversubscription and improve multiprocessing stability on HPC.
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    try:
+        torch.set_num_threads(1)
+        if hasattr(torch, "set_num_interop_threads"):
+            torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+
+
 def build_motif_cache_for_split(
     dataset_name: str,
     split: str,
@@ -188,6 +202,7 @@ def build_motif_cache_for_split(
     backend: str = "python",
     orca_path: str = "",
     num_workers: int = 1,
+    start_method: str = "spawn",
     overwrite: bool = False,
 ) -> str:
     save_file = motif_cache_file(dataset_name, split, top_k=top_k, backend=backend)
@@ -210,7 +225,8 @@ def build_motif_cache_for_split(
             motif_dict[sample_id] = motif_entry
     else:
         work_items = ((sample, top_k, backend, orca_path) for sample in processed_dict_list)
-        with ProcessPoolExecutor(max_workers=num_workers) as ex:
+        ctx = mp.get_context(start_method)
+        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_init) as ex:
             for sample_id, motif_entry in tqdm(
                 ex.map(_build_single, work_items, chunksize=32),
                 total=len(processed_dict_list),

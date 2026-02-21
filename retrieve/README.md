@@ -91,6 +91,8 @@ where `D` is one of the supported datasets.
 Notes:
 
 - This step is parallelized across samples and uses a neighbor-based motif counter.
+- On HPC, keep the multiprocessing start method as `spawn` (default) to avoid `fork` deadlocks:
+  - `python motif_preprocess.py -d D --num_workers 32 --start_method spawn`
 - The resulting cache files are saved in `data_files/{dataset}/motif_tokens/`.
 - If caches are missing, `train.py` and `inference.py` will fail immediately with a clear message.
 
