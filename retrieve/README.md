@@ -8,6 +8,7 @@
     * [Inference (Embedding Computation)](#inference-embedding-computation)
 - [1-2 Retriever Development](#1-2-retriever-development)
     * [Installation](#installation-1)
+    * [Offline Motif Preprocessing](#offline-motif-preprocessing)
     * [Training](#training)
     * [Inference](#inference)
     * [Evaluation](#evaluation)
@@ -57,6 +58,7 @@ The retriever now supports motif-driven tokenization with directed 3-node motifs
   - `motif.motif_emb_dim` (`64` by default)
 - Optional ORCA integration is scaffolded through `motif.backend=orca` and `motif.orca_path`.
   If unavailable, the code falls back to the Python implementation.
+- Motif computation is now **offline only**. `RetrieverDataset` loads cache files and fails fast if they are missing.
 - Retrieval outputs keep backward compatibility and append:
   - `scored_triple_motif_tokens`
   - `target_relevant_triple_motif_tokens`
@@ -75,6 +77,22 @@ pip install torch==2.1.0 --index-url https://download.pytorch.org/whl/cu121
 pip install torch_geometric==2.5.3
 pip install pyg_lib==0.3.1 torch_scatter==2.1.2 torch_sparse==0.6.18 -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
 ```
+
+### Offline Motif Preprocessing
+
+Before training/inference with motif retrieval enabled, generate motif caches:
+
+```bash
+python motif_preprocess.py -d D --splits train,val,test --num_workers 32
+```
+
+where `D` is one of the supported datasets.
+
+Notes:
+
+- This step is parallelized across samples and uses a neighbor-based motif counter.
+- The resulting cache files are saved in `data_files/{dataset}/motif_tokens/`.
+- If caches are missing, `train.py` and `inference.py` will fail immediately with a clear message.
 
 ### Training
 
