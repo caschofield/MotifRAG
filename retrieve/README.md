@@ -91,8 +91,12 @@ where `D` is one of the supported datasets.
 Notes:
 
 - This step is parallelized across samples and uses a neighbor-based motif counter.
+- Worker payloads are minimal (`id`, `h_id_list`, `t_id_list`, `num_entities`) to reduce IPC memory.
+- Results are stream-written into shard files to avoid large in-memory accumulation.
 - On HPC, keep the multiprocessing start method as `spawn` (default) to avoid `fork` deadlocks:
   - `python motif_preprocess.py -d D --num_workers 32 --start_method spawn`
+- Tune shard flushing with `--shard_size` if needed:
+  - `python motif_preprocess.py -d D --num_workers 32 --shard_size 1000`
 - The resulting cache files are saved in `data_files/{dataset}/motif_tokens/`.
 - If caches are missing, `train.py` and `inference.py` will fail immediately with a clear message.
 

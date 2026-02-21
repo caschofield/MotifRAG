@@ -3,10 +3,9 @@ import pickle
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import networkx as nx
-import torch
 from networkx.algorithms.triads import TRIAD_NAMES
 from tqdm import tqdm
 
@@ -42,9 +41,9 @@ def _build_mask_to_token() -> List[int]:
 MASK_TO_TOKEN = _build_mask_to_token()
 
 
-def _counter_to_topk(counter: Counter, top_k: int) -> Tuple[torch.LongTensor, torch.FloatTensor]:
-    ids = torch.zeros(top_k, dtype=torch.long)
-    wts = torch.zeros(top_k, dtype=torch.float)
+def _counter_to_topk(counter: Counter, top_k: int) -> Tuple[List[int], List[float]]:
+    ids = [0 for _ in range(top_k)]
+    wts = [0.0 for _ in range(top_k)]
     if len(counter) == 0:
         return ids, wts
 
@@ -109,7 +108,9 @@ def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4, backend: str = "
 
     h_id_list = sample["h_id_list"]
     t_id_list = sample["t_id_list"]
-    num_entities = len(sample["text_entity_list"]) + len(sample["non_text_entity_list"])
+    num_entities = sample.get("num_entities")
+    if num_entities is None:
+        num_entities = len(sample["text_entity_list"]) + len(sample["non_text_entity_list"])
     num_triples = len(h_id_list)
 
     out_adj = [set() for _ in range(num_entities)]
@@ -147,15 +148,15 @@ def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4, backend: str = "
         for triple_id in triple_ids:
             triple_counters[triple_id] = counter
 
-    node_ids = torch.zeros((num_entities, top_k), dtype=torch.long)
-    node_wts = torch.zeros((num_entities, top_k), dtype=torch.float)
+    node_ids = [[0 for _ in range(top_k)] for _ in range(num_entities)]
+    node_wts = [[0.0 for _ in range(top_k)] for _ in range(num_entities)]
     for node_id in range(num_entities):
         ids_i, wts_i = _counter_to_topk(node_counters[node_id], top_k)
         node_ids[node_id] = ids_i
         node_wts[node_id] = wts_i
 
-    triple_ids = torch.zeros((num_triples, top_k), dtype=torch.long)
-    triple_wts = torch.zeros((num_triples, top_k), dtype=torch.float)
+    triple_ids = [[0 for _ in range(top_k)] for _ in range(num_triples)]
+    triple_wts = [[0.0 for _ in range(top_k)] for _ in range(num_triples)]
     for triple_id in range(num_triples):
         counter = triple_counters[triple_id]
         if counter is None:
@@ -173,9 +174,9 @@ def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4, backend: str = "
 
 
 def _build_single(args):
-    sample, top_k, backend, orca_path = args
-    return sample["id"], build_motif_tokens_for_sample(
-        sample=sample,
+    sample_payload, top_k, backend, orca_path = args
+    return sample_payload["id"], build_motif_tokens_for_sample(
+        sample=sample_payload,
         top_k=top_k,
         backend=backend,
         orca_path=orca_path,
@@ -187,12 +188,21 @@ def _worker_init():
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    try:
-        torch.set_num_threads(1)
-        if hasattr(torch, "set_num_interop_threads"):
-            torch.set_num_interop_threads(1)
-    except Exception:
-        pass
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+
+def _minimal_payload(sample: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": sample["id"],
+        "h_id_list": sample["h_id_list"],
+        "t_id_list": sample["t_id_list"],
+        "num_entities": len(sample["text_entity_list"]) + len(sample["non_text_entity_list"]),
+    }
+
+
+def _write_shard(shard_file: str, shard_data: Dict[str, Dict[str, Any]]):
+    with open(shard_file, "wb") as f:
+        pickle.dump(shard_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def build_motif_cache_for_split(
@@ -203,12 +213,22 @@ def build_motif_cache_for_split(
     orca_path: str = "",
     num_workers: int = 1,
     start_method: str = "spawn",
+    shard_size: int = 2000,
     overwrite: bool = False,
 ) -> str:
     save_file = motif_cache_file(dataset_name, split, top_k=top_k, backend=backend)
-    os.makedirs(os.path.dirname(save_file), exist_ok=True)
+    save_dir = os.path.dirname(save_file)
+    os.makedirs(save_dir, exist_ok=True)
+    shard_dir = os.path.join(save_dir, f"{split}_triad3_top{top_k}_{backend}.shards")
+
     if (not overwrite) and os.path.exists(save_file):
         return save_file
+    if overwrite and os.path.isdir(shard_dir):
+        for fn in os.listdir(shard_dir):
+            fp = os.path.join(shard_dir, fn)
+            if os.path.isfile(fp):
+                os.remove(fp)
+    os.makedirs(shard_dir, exist_ok=True)
 
     processed_file = os.path.join("data_files", dataset_name, "processed", f"{split}.pkl")
     if not os.path.exists(processed_file):
@@ -218,22 +238,61 @@ def build_motif_cache_for_split(
     with open(processed_file, "rb") as f:
         processed_dict_list = pickle.load(f)
 
-    motif_dict = {}
+    payloads = [_minimal_payload(sample) for sample in processed_dict_list]
+    shard_files = []
+    shard_data: Dict[str, Dict[str, Any]] = {}
+    shard_idx = 0
+
+    def flush_shard():
+        nonlocal shard_data, shard_idx
+        if len(shard_data) == 0:
+            return
+        shard_file = os.path.join(shard_dir, f"part_{shard_idx:05d}.pkl")
+        _write_shard(shard_file, shard_data)
+        shard_files.append(os.path.basename(shard_file))
+        shard_idx += 1
+        shard_data = {}
+
     if num_workers <= 1:
-        for sample in tqdm(processed_dict_list, desc=f"motifs:{split}"):
-            sample_id, motif_entry = _build_single((sample, top_k, backend, orca_path))
-            motif_dict[sample_id] = motif_entry
+        for sample_payload in tqdm(payloads, desc=f"motifs:{split}"):
+            sample_id, motif_entry = _build_single((sample_payload, top_k, backend, orca_path))
+            shard_data[sample_id] = motif_entry
+            if len(shard_data) >= shard_size:
+                flush_shard()
     else:
-        work_items = ((sample, top_k, backend, orca_path) for sample in processed_dict_list)
-        ctx = mp.get_context(start_method)
-        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_init) as ex:
-            for sample_id, motif_entry in tqdm(
-                ex.map(_build_single, work_items, chunksize=32),
-                total=len(processed_dict_list),
-                desc=f"motifs:{split}",
-            ):
-                motif_dict[sample_id] = motif_entry
-    torch.save(motif_dict, save_file)
+        work_items = ((sample_payload, top_k, backend, orca_path) for sample_payload in payloads)
+        try:
+            ctx = mp.get_context(start_method)
+            with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_init) as ex:
+                for sample_id, motif_entry in tqdm(
+                    ex.map(_build_single, work_items, chunksize=32),
+                    total=len(payloads),
+                    desc=f"motifs:{split}",
+                ):
+                    shard_data[sample_id] = motif_entry
+                    if len(shard_data) >= shard_size:
+                        flush_shard()
+        except (PermissionError, OSError) as e:
+            print(f"[motif_preprocess] multiprocessing unavailable ({e}). Falling back to single worker.")
+            for sample_payload in tqdm(payloads, desc=f"motifs:{split}:fallback"):
+                sample_id, motif_entry = _build_single((sample_payload, top_k, backend, orca_path))
+                shard_data[sample_id] = motif_entry
+                if len(shard_data) >= shard_size:
+                    flush_shard()
+    flush_shard()
+
+    manifest = {
+        "format": "sharded_v1",
+        "dataset_name": dataset_name,
+        "split": split,
+        "top_k": top_k,
+        "backend": backend,
+        "num_samples": len(payloads),
+        "shard_size": shard_size,
+        "shard_files": shard_files,
+    }
+    with open(save_file, "wb") as f:
+        pickle.dump(manifest, f, protocol=pickle.HIGHEST_PROTOCOL)
     return save_file
 
 
@@ -241,4 +300,29 @@ def load_motif_cache(dataset_name: str, split: str, top_k: int = 4, backend: str
     save_file = motif_cache_file(dataset_name, split, top_k=top_k, backend=backend)
     if not os.path.exists(save_file):
         raise FileNotFoundError(save_file)
-    return torch.load(save_file)
+
+    try:
+        with open(save_file, "rb") as f:
+            payload = pickle.load(f)
+    except Exception:
+        # Backward-compatibility for old torch serialized caches.
+        import torch
+        return torch.load(save_file, weights_only=False)
+
+    if isinstance(payload, dict) and payload.get("format") == "sharded_v1":
+        motif_dict = {}
+        base_dir = os.path.dirname(save_file)
+        shard_dir = os.path.join(
+            base_dir,
+            f"{payload.get('split')}_triad3_top{payload.get('top_k')}_{payload.get('backend')}.shards",
+        )
+        for shard_file in payload.get("shard_files", []):
+            shard_path = shard_file if os.path.isabs(shard_file) else os.path.join(shard_dir, shard_file)
+            with open(shard_path, "rb") as f:
+                shard = pickle.load(f)
+            motif_dict.update(shard)
+        return motif_dict
+
+    if isinstance(payload, dict):
+        return payload
+    raise ValueError(f"Invalid motif cache format in {save_file}")

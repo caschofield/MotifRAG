@@ -260,7 +260,15 @@ class RetrieverDataset:
             num_entities_i = len(sample_i['text_entity_list']) + len(sample_i['non_text_entity_list'])
             num_triples_i = len(sample_i['h_id_list'])
             if motif_dict is not None and sample_i_id in motif_dict:
-                sample_i.update(motif_dict[sample_i_id])
+                motif_entry = motif_dict[sample_i_id]
+                sample_i['node_motif_token_ids'] = torch.tensor(
+                    motif_entry['node_motif_token_ids'], dtype=torch.long)
+                sample_i['node_motif_token_wts'] = torch.tensor(
+                    motif_entry['node_motif_token_wts'], dtype=torch.float)
+                sample_i['triple_motif_token_ids'] = torch.tensor(
+                    motif_entry['triple_motif_token_ids'], dtype=torch.long)
+                sample_i['triple_motif_token_wts'] = torch.tensor(
+                    motif_entry['triple_motif_token_wts'], dtype=torch.float)
             else:
                 sample_i['node_motif_token_ids'] = torch.zeros(
                     (num_entities_i, top_k_motif_tokens), dtype=torch.long)
