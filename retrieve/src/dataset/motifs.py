@@ -237,8 +237,12 @@ def build_motif_cache_for_split(
         )
     with open(processed_file, "rb") as f:
         processed_dict_list = pickle.load(f)
+    num_samples = len(processed_dict_list)
 
-    payloads = [_minimal_payload(sample) for sample in processed_dict_list]
+    # Minimize resident memory: drop unused fields early and keep only minimal payloads.
+    for i in range(num_samples):
+        processed_dict_list[i] = _minimal_payload(processed_dict_list[i])
+
     shard_files = []
     shard_data: Dict[str, Dict[str, Any]] = {}
     shard_idx = 0
@@ -254,19 +258,20 @@ def build_motif_cache_for_split(
         shard_data = {}
 
     if num_workers <= 1:
-        for sample_payload in tqdm(payloads, desc=f"motifs:{split}"):
+        for i, sample_payload in enumerate(tqdm(processed_dict_list, total=num_samples, desc=f"motifs:{split}")):
             sample_id, motif_entry = _build_single((sample_payload, top_k, backend, orca_path))
             shard_data[sample_id] = motif_entry
+            processed_dict_list[i] = None
             if len(shard_data) >= shard_size:
                 flush_shard()
     else:
-        work_items = ((sample_payload, top_k, backend, orca_path) for sample_payload in payloads)
+        work_items = ((sample_payload, top_k, backend, orca_path) for sample_payload in processed_dict_list)
         try:
             ctx = mp.get_context(start_method)
             with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_init) as ex:
                 for sample_id, motif_entry in tqdm(
                     ex.map(_build_single, work_items, chunksize=32),
-                    total=len(payloads),
+                    total=num_samples,
                     desc=f"motifs:{split}",
                 ):
                     shard_data[sample_id] = motif_entry
@@ -274,12 +279,16 @@ def build_motif_cache_for_split(
                         flush_shard()
         except (PermissionError, OSError) as e:
             print(f"[motif_preprocess] multiprocessing unavailable ({e}). Falling back to single worker.")
-            for sample_payload in tqdm(payloads, desc=f"motifs:{split}:fallback"):
+            for i, sample_payload in enumerate(tqdm(processed_dict_list, total=num_samples, desc=f"motifs:{split}:fallback")):
+                if sample_payload is None:
+                    continue
                 sample_id, motif_entry = _build_single((sample_payload, top_k, backend, orca_path))
                 shard_data[sample_id] = motif_entry
+                processed_dict_list[i] = None
                 if len(shard_data) >= shard_size:
                     flush_shard()
     flush_shard()
+    del processed_dict_list
 
     manifest = {
         "format": "sharded_v1",
@@ -287,7 +296,7 @@ def build_motif_cache_for_split(
         "split": split,
         "top_k": top_k,
         "backend": backend,
-        "num_samples": len(payloads),
+        "num_samples": num_samples,
         "shard_size": shard_size,
         "shard_files": shard_files,
     }
