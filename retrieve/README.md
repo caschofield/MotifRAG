@@ -56,9 +56,6 @@ The retriever now supports motif-driven tokenization with directed 3-node motifs
   - `motif.backend` (`python` by default)
   - `motif.top_k_tokens` (`4` by default)
   - `motif.motif_emb_dim` (`64` by default)
-  - `motif.query_cross_attn_enabled` (`false` by default; enables query-conditioned motif aggregation)
-  - `motif.motif_residual_blend_enabled` (`false` by default; uses `m_static + alpha * m_query`)
-  - `motif.motif_residual_init_alpha` (`0.2` by default)
 - Optional ORCA integration is scaffolded through `motif.backend=orca` and `motif.orca_path`.
   If unavailable, the code falls back to the Python implementation.
 - Motif computation is now **offline only**. `RetrieverDataset` loads cache files and fails fast if they are missing.
