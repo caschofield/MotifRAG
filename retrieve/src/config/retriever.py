@@ -25,6 +25,8 @@ class MotifYaml(pydantic.BaseModel):
     motif_emb_dim: int = 64
     vocab_size: int = 17
     query_cross_attn_enabled: bool = False
+    motif_residual_blend_enabled: bool = False
+    motif_residual_init_alpha: float = 0.2
 
 
 class LossYaml(pydantic.BaseModel):

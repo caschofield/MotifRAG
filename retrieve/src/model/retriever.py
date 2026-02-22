@@ -73,8 +73,12 @@ class Retriever(nn.Module):
             motif_emb_dim = self.motif_cfg.get('motif_emb_dim', 64)
             self.motif_emb = nn.Embedding(motif_vocab_size, motif_emb_dim, padding_idx=0)
             self.query_cross_attn_enabled = self.motif_cfg.get('query_cross_attn_enabled', False)
-            if self.query_cross_attn_enabled:
+            self.motif_residual_blend_enabled = self.motif_cfg.get('motif_residual_blend_enabled', False)
+            if self.query_cross_attn_enabled or self.motif_residual_blend_enabled:
                 self.q_to_motif = nn.Linear(emb_size, motif_emb_dim)
+            if self.motif_residual_blend_enabled:
+                init_alpha = self.motif_cfg.get('motif_residual_init_alpha', 0.2)
+                self.motif_residual_alpha = nn.Parameter(torch.tensor(float(init_alpha)))
 
             pos_node_dim = (2 if topic_pe else 0) + 2 * (
                 DDE_kwargs['num_rounds'] + DDE_kwargs['num_reverse_rounds']
@@ -103,6 +107,7 @@ class Retriever(nn.Module):
             )
         else:
             self.query_cross_attn_enabled = False
+            self.motif_residual_blend_enabled = False
             pred_in_size = 4 * emb_size
             if topic_pe:
                 pred_in_size += 2 * 2
@@ -200,6 +205,17 @@ class Retriever(nn.Module):
             triple_motif_emb = self._aggregate_motif_emb_query_conditioned(
                 triple_motif_token_ids, triple_motif_token_wts, h_q
             )
+        elif self.motif_residual_blend_enabled:
+            node_motif_emb_static = self._aggregate_motif_emb(node_motif_token_ids, node_motif_token_wts)
+            triple_motif_emb_static = self._aggregate_motif_emb(triple_motif_token_ids, triple_motif_token_wts)
+            node_motif_emb_query = self._aggregate_motif_emb_query_conditioned(
+                node_motif_token_ids, node_motif_token_wts, h_q
+            )
+            triple_motif_emb_query = self._aggregate_motif_emb_query_conditioned(
+                triple_motif_token_ids, triple_motif_token_wts, h_q
+            )
+            node_motif_emb = node_motif_emb_static + self.motif_residual_alpha * node_motif_emb_query
+            triple_motif_emb = triple_motif_emb_static + self.motif_residual_alpha * triple_motif_emb_query
         else:
             node_motif_emb = self._aggregate_motif_emb(node_motif_token_ids, node_motif_token_wts)
             triple_motif_emb = self._aggregate_motif_emb(triple_motif_token_ids, triple_motif_token_wts)
