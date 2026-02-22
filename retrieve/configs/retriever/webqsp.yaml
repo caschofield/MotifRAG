@@ -22,6 +22,7 @@ motif:
   top_k_tokens: 4
   motif_emb_dim: 64
   vocab_size: 17
+  query_cross_attn_enabled: false
 
 loss:
   motif_kl_weight: 0.1

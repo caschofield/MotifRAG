@@ -24,6 +24,7 @@ class MotifYaml(pydantic.BaseModel):
     top_k_tokens: int = 4
     motif_emb_dim: int = 64
     vocab_size: int = 17
+    query_cross_attn_enabled: bool = False
 
 
 class LossYaml(pydantic.BaseModel):
