@@ -56,6 +56,10 @@ The retriever now supports motif-driven tokenization with directed 3-node motifs
   - `motif.backend` (`python` by default)
   - `motif.top_k_tokens` (`4` by default)
   - `motif.motif_emb_dim` (`64` by default)
+  - `motif.rerank_enabled` (two-stage motif reranking; `false` by default)
+  - `motif.rerank_top_l` (number of stage-1 candidates to rerank; `256` by default)
+  - `motif.rerank_alpha` (logit blend weight for rerank delta; `0.5` by default)
+  - `motif.rerank_hidden_dim` (hidden size of rerank head; `128` by default)
 - Optional ORCA integration is scaffolded through `motif.backend=orca` and `motif.orca_path`.
   If unavailable, the code falls back to the Python implementation.
 - Motif computation is now **offline only**. `RetrieverDataset` loads cache files and fails fast if they are missing.

@@ -72,6 +72,10 @@ class Retriever(nn.Module):
             motif_vocab_size = self.motif_cfg.get('vocab_size', 17)
             motif_emb_dim = self.motif_cfg.get('motif_emb_dim', 64)
             self.motif_emb = nn.Embedding(motif_vocab_size, motif_emb_dim, padding_idx=0)
+            self.rerank_enabled = bool(self.motif_cfg.get('rerank_enabled', False))
+            self.rerank_top_l = int(self.motif_cfg.get('rerank_top_l', 256))
+            self.rerank_alpha = float(self.motif_cfg.get('rerank_alpha', 0.5))
+            self.rerank_hidden_dim = int(self.motif_cfg.get('rerank_hidden_dim', 128))
 
             pos_node_dim = (2 if topic_pe else 0) + 2 * (
                 DDE_kwargs['num_rounds'] + DDE_kwargs['num_reverse_rounds']
@@ -98,7 +102,15 @@ class Retriever(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim, 1),
             )
+            if self.rerank_enabled:
+                self.rerank_q_proj = nn.Linear(emb_size, motif_emb_dim)
+                self.rerank_head = nn.Sequential(
+                    nn.Linear(emb_size + hidden_dim + motif_emb_dim + 1, self.rerank_hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(self.rerank_hidden_dim, 1),
+                )
         else:
+            self.rerank_enabled = False
             pred_in_size = 4 * emb_size
             if topic_pe:
                 pred_in_size += 2 * 2
@@ -195,8 +207,32 @@ class Retriever(nn.Module):
         h_fused = gate[0] * h_neighborhood + gate[1] * h_position + gate[2] * h_structure
 
         pred_in = torch.cat([h_q.expand(len(h_r), -1), h_fused], dim=1)
-        pred = self.pred(pred_in)
+        base_pred = self.pred(pred_in)
+        pred = base_pred
+        rerank_count = 0
+        if self.rerank_enabled and len(h_r) > 0:
+            rerank_top_l = min(self.rerank_top_l, len(h_r))
+            if rerank_top_l > 0:
+                base_scores = base_pred.squeeze(-1)
+                top_idx = torch.topk(base_scores, rerank_top_l, sorted=False).indices
+                q_proj = self.rerank_q_proj(h_q)
+                top_motif = triple_motif_emb[top_idx]
+                motif_align = (top_motif * q_proj.expand(rerank_top_l, -1)).sum(dim=1, keepdim=True)
+                rerank_in = torch.cat([
+                    h_q.expand(rerank_top_l, -1),
+                    h_fused[top_idx],
+                    top_motif,
+                    motif_align,
+                ], dim=1)
+                rerank_delta = self.rerank_head(rerank_in).squeeze(-1)
+                delta_full = torch.zeros_like(base_scores)
+                delta_full = delta_full.scatter(0, top_idx, rerank_delta)
+                pred = base_pred + self.rerank_alpha * delta_full.unsqueeze(-1)
+                rerank_count = rerank_top_l
 
         if return_aux:
-            return pred, {'gate': gate.detach()}
+            aux = {'gate': gate.detach()}
+            if self.rerank_enabled:
+                aux['rerank_count'] = rerank_count
+            return pred, aux
         return pred
