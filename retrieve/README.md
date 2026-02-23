@@ -56,8 +56,6 @@ The retriever now supports motif-driven tokenization with directed 3-node motifs
   - `motif.backend` (`python` by default)
   - `motif.top_k_tokens` (`4` by default)
   - `motif.motif_emb_dim` (`64` by default)
-  - `motif.semantic_gnn_num_layers` (`1` by default; runs motif-graph message passing on 17 motif nodes)
-  - `motif.semantic_gnn_dropout` (`0.0` by default)
 - Optional ORCA integration is scaffolded through `motif.backend=orca` and `motif.orca_path`.
   If unavailable, the code falls back to the Python implementation.
 - Motif computation is now **offline only**. `RetrieverDataset` loads cache files and fails fast if they are missing.

@@ -71,15 +71,7 @@ class Retriever(nn.Module):
         if self.motif_enabled:
             motif_vocab_size = self.motif_cfg.get('vocab_size', 17)
             motif_emb_dim = self.motif_cfg.get('motif_emb_dim', 64)
-            self.motif_vocab_size = motif_vocab_size
             self.motif_emb = nn.Embedding(motif_vocab_size, motif_emb_dim, padding_idx=0)
-            self.motif_semantic_gnn_num_layers = max(0, int(self.motif_cfg.get('semantic_gnn_num_layers', 1)))
-            self.motif_semantic_gnn_dropout = float(self.motif_cfg.get('semantic_gnn_dropout', 0.0))
-            self.motif_gnn_self_layers = nn.ModuleList()
-            self.motif_gnn_msg_layers = nn.ModuleList()
-            for _ in range(self.motif_semantic_gnn_num_layers):
-                self.motif_gnn_self_layers.append(nn.Linear(motif_emb_dim, motif_emb_dim))
-                self.motif_gnn_msg_layers.append(nn.Linear(motif_emb_dim, motif_emb_dim))
 
             pos_node_dim = (2 if topic_pe else 0) + 2 * (
                 DDE_kwargs['num_rounds'] + DDE_kwargs['num_reverse_rounds']
@@ -107,7 +99,6 @@ class Retriever(nn.Module):
                 nn.Linear(hidden_dim, 1),
             )
         else:
-            self.motif_semantic_gnn_num_layers = 0
             pred_in_size = 4 * emb_size
             if topic_pe:
                 pred_in_size += 2 * 2
@@ -118,60 +109,9 @@ class Retriever(nn.Module):
                 nn.Linear(emb_size, 1)
             )
 
-    def _aggregate_motif_emb(self, token_ids, token_wts, motif_table=None):
-        if motif_table is None:
-            token_emb = self.motif_emb(token_ids)
-        else:
-            token_emb = motif_table[token_ids]
+    def _aggregate_motif_emb(self, token_ids, token_wts):
+        token_emb = self.motif_emb(token_ids)
         return (token_emb * token_wts.unsqueeze(-1)).sum(dim=1)
-
-    def _build_motif_graph(self, triple_motif_token_ids, triple_motif_token_wts):
-        vocab_size = self.motif_vocab_size
-        device = triple_motif_token_ids.device
-        dtype = triple_motif_token_wts.dtype
-        adj = torch.zeros((vocab_size, vocab_size), device=device, dtype=dtype)
-        adj_flat = adj.view(-1)
-
-        num_topk = triple_motif_token_ids.size(1)
-        for i in range(num_topk):
-            ids_i = triple_motif_token_ids[:, i]
-            w_i = triple_motif_token_wts[:, i]
-            valid_i = ids_i > 0
-            if not valid_i.any():
-                continue
-            for j in range(num_topk):
-                ids_j = triple_motif_token_ids[:, j]
-                w_j = triple_motif_token_wts[:, j]
-                contrib = w_i * w_j
-                valid = valid_i & (ids_j > 0) & (contrib > 0)
-                if not valid.any():
-                    continue
-                idx = ids_i[valid] * vocab_size + ids_j[valid]
-                adj_flat.scatter_add_(0, idx, contrib[valid])
-
-        adj = 0.5 * (adj + adj.transpose(0, 1))
-        adj = adj + torch.eye(vocab_size, device=device, dtype=dtype)
-        # Keep PAD isolated.
-        adj[0, :] = 0
-        adj[:, 0] = 0
-        adj[0, 0] = 1.0
-        deg = adj.sum(dim=1, keepdim=True).clamp_min(1e-8)
-        return adj / deg
-
-    def _contextualized_motif_table(self, triple_motif_token_ids, triple_motif_token_wts):
-        motif_table = self.motif_emb.weight
-        if self.motif_semantic_gnn_num_layers == 0:
-            return motif_table
-
-        adj = self._build_motif_graph(triple_motif_token_ids, triple_motif_token_wts)
-        h = motif_table
-        for self_layer, msg_layer in zip(self.motif_gnn_self_layers, self.motif_gnn_msg_layers):
-            msg = adj @ h
-            h_new = self_layer(h) + msg_layer(msg)
-            h = h + F.relu(h_new)
-            if self.motif_semantic_gnn_dropout > 0:
-                h = F.dropout(h, p=self.motif_semantic_gnn_dropout, training=self.training)
-        return h
 
     def forward(
         self,
@@ -230,9 +170,8 @@ class Retriever(nn.Module):
                 return pred, {}
             return pred
 
-        motif_table = self._contextualized_motif_table(triple_motif_token_ids, triple_motif_token_wts)
-        node_motif_emb = self._aggregate_motif_emb(node_motif_token_ids, node_motif_token_wts, motif_table)
-        triple_motif_emb = self._aggregate_motif_emb(triple_motif_token_ids, triple_motif_token_wts, motif_table)
+        node_motif_emb = self._aggregate_motif_emb(node_motif_token_ids, node_motif_token_wts)
+        triple_motif_emb = self._aggregate_motif_emb(triple_motif_token_ids, triple_motif_token_wts)
 
         h_h = h_e[h_id_tensor]
         h_t = h_e[t_id_tensor]
