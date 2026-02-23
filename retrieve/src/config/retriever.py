@@ -24,6 +24,8 @@ class MotifYaml(pydantic.BaseModel):
     top_k_tokens: int = 4
     motif_emb_dim: int = 64
     vocab_size: int = 17
+    semantic_gnn_num_layers: int = 1
+    semantic_gnn_dropout: float = 0.0
 
 
 class LossYaml(pydantic.BaseModel):
