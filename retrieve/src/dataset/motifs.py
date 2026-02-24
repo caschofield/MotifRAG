@@ -10,6 +10,10 @@ from networkx.algorithms.triads import TRIAD_NAMES
 from tqdm import tqdm
 
 PAD_TOKEN_ID = 0
+EXCLUDED_TRIAD_NAMES = {"003", "012", "102"}
+EXCLUDED_TOKEN_IDS = {TRIAD_NAMES.index(name) + 1 for name in EXCLUDED_TRIAD_NAMES}
+MOTIF_CACHE_FILTER_TAG = "no003_012_102"
+INCLUDE_DISCONNECTED_CONTRIBUTIONS = False
 MOTIF_VOCAB_SIZE = 1 + len(TRIAD_NAMES)  # +1 for PAD
 
 
@@ -34,11 +38,62 @@ def _build_mask_to_token() -> List[int]:
                 break
         if triad_name is None:
             continue
+        if triad_name in EXCLUDED_TRIAD_NAMES:
+            # Excluded low-information/disconnected motifs are treated as PAD.
+            continue
         mask_to_token[mask] = TRIAD_NAMES.index(triad_name) + 1
     return mask_to_token
 
 
 MASK_TO_TOKEN = _build_mask_to_token()
+
+
+def _sanitize_token_lists(token_ids: List[int], token_wts: List[float], top_k: int) -> Tuple[List[int], List[float]]:
+    kept = []
+    for token_id, wt in zip(token_ids, token_wts):
+        token_id = int(token_id)
+        wt = float(wt)
+        if token_id in EXCLUDED_TOKEN_IDS:
+            continue
+        if token_id <= PAD_TOKEN_ID or wt <= 0:
+            continue
+        kept.append((token_id, wt))
+
+    ids = [0 for _ in range(top_k)]
+    wts = [0.0 for _ in range(top_k)]
+    if len(kept) == 0:
+        return ids, wts
+
+    mass = sum(w for _, w in kept)
+    if mass <= 0:
+        return ids, wts
+
+    for i, (token_id, wt) in enumerate(kept[:top_k]):
+        ids[i] = token_id
+        wts[i] = float(wt / mass)
+    return ids, wts
+
+
+def _sanitize_motif_entry(entry: Dict[str, Any], top_k: int):
+    node_ids = entry.get("node_motif_token_ids", [])
+    node_wts = entry.get("node_motif_token_wts", [])
+    triple_ids = entry.get("triple_motif_token_ids", [])
+    triple_wts = entry.get("triple_motif_token_wts", [])
+
+    for i in range(len(node_ids)):
+        ids_i, wts_i = _sanitize_token_lists(node_ids[i], node_wts[i], top_k)
+        node_ids[i] = ids_i
+        node_wts[i] = wts_i
+
+    for i in range(len(triple_ids)):
+        ids_i, wts_i = _sanitize_token_lists(triple_ids[i], triple_wts[i], top_k)
+        triple_ids[i] = ids_i
+        triple_wts[i] = wts_i
+
+
+def _sanitize_motif_dict(motif_dict: Dict[str, Dict[str, Any]], top_k: int):
+    for sample_id in motif_dict:
+        _sanitize_motif_entry(motif_dict[sample_id], top_k)
 
 
 def _counter_to_topk(counter: Counter, top_k: int) -> Tuple[List[int], List[float]]:
@@ -47,7 +102,11 @@ def _counter_to_topk(counter: Counter, top_k: int) -> Tuple[List[int], List[floa
     if len(counter) == 0:
         return ids, wts
 
-    ranked = sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:top_k]
+    ranked = [
+        (token_id, count)
+        for token_id, count in sorted(counter.items(), key=lambda x: (-x[1], x[0]))
+        if token_id not in EXCLUDED_TOKEN_IDS
+    ][:top_k]
     total = sum(v for _, v in ranked)
     if total == 0:
         return ids, wts
@@ -60,7 +119,10 @@ def _counter_to_topk(counter: Counter, top_k: int) -> Tuple[List[int], List[floa
 
 def motif_cache_file(dataset_name: str, split: str, top_k: int = 4, backend: str = "python") -> str:
     save_dir = os.path.join("data_files", dataset_name, "motif_tokens")
-    return os.path.join(save_dir, f"{split}_triad3_top{top_k}_{backend}.pth")
+    return os.path.join(
+        save_dir,
+        f"{split}_triad3_top{top_k}_{backend}_{MOTIF_CACHE_FILTER_TAG}.pth",
+    )
 
 
 def _count_motifs_for_pair(
@@ -79,11 +141,12 @@ def _count_motifs_for_pair(
     if t_i in candidates:
         candidates.remove(t_i)
 
-    disconnected = max(0, (num_entities - 2) - len(candidates))
-    if disconnected > 0:
-        token_id = MASK_TO_TOKEN[base_mask]
-        if token_id != PAD_TOKEN_ID:
-            counter[token_id] += disconnected
+    if INCLUDE_DISCONNECTED_CONTRIBUTIONS:
+        disconnected = max(0, (num_entities - 2) - len(candidates))
+        if disconnected > 0:
+            token_id = MASK_TO_TOKEN[base_mask]
+            if token_id != PAD_TOKEN_ID:
+                counter[token_id] += disconnected
 
     for c_i in candidates:
         mask = base_mask
@@ -100,7 +163,6 @@ def _count_motifs_for_pair(
 
 def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4, backend: str = "python", orca_path: str = "") -> Dict:
     if backend == "orca":
-        # Placeholder hook: we keep ORCA optional and non-blocking.
         if not orca_path or not os.path.exists(orca_path):
             backend = "python"
         else:
@@ -165,12 +227,14 @@ def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4, backend: str = "
         triple_ids[triple_id] = ids_i
         triple_wts[triple_id] = wts_i
 
-    return {
+    entry = {
         "node_motif_token_ids": node_ids,
         "node_motif_token_wts": node_wts,
         "triple_motif_token_ids": triple_ids,
         "triple_motif_token_wts": triple_wts,
     }
+    _sanitize_motif_entry(entry, top_k)
+    return entry
 
 
 def _build_single(args):
@@ -219,7 +283,10 @@ def build_motif_cache_for_split(
     save_file = motif_cache_file(dataset_name, split, top_k=top_k, backend=backend)
     save_dir = os.path.dirname(save_file)
     os.makedirs(save_dir, exist_ok=True)
-    shard_dir = os.path.join(save_dir, f"{split}_triad3_top{top_k}_{backend}.shards")
+    shard_dir = os.path.join(
+        save_dir,
+        f"{split}_triad3_top{top_k}_{backend}_{MOTIF_CACHE_FILTER_TAG}.shards",
+    )
 
     if (not overwrite) and os.path.exists(save_file):
         return save_file
@@ -296,6 +363,8 @@ def build_motif_cache_for_split(
         "split": split,
         "top_k": top_k,
         "backend": backend,
+        "filter_tag": MOTIF_CACHE_FILTER_TAG,
+        "excluded_triad_names": sorted(list(EXCLUDED_TRIAD_NAMES)),
         "num_samples": num_samples,
         "shard_size": shard_size,
         "shard_files": shard_files,
@@ -321,17 +390,21 @@ def load_motif_cache(dataset_name: str, split: str, top_k: int = 4, backend: str
     if isinstance(payload, dict) and payload.get("format") == "sharded_v1":
         motif_dict = {}
         base_dir = os.path.dirname(save_file)
+        filter_tag = payload.get("filter_tag", "")
+        shard_suffix = f"_{filter_tag}" if filter_tag else ""
         shard_dir = os.path.join(
             base_dir,
-            f"{payload.get('split')}_triad3_top{payload.get('top_k')}_{payload.get('backend')}.shards",
+            f"{payload.get('split')}_triad3_top{payload.get('top_k')}_{payload.get('backend')}{shard_suffix}.shards",
         )
         for shard_file in payload.get("shard_files", []):
             shard_path = shard_file if os.path.isabs(shard_file) else os.path.join(shard_dir, shard_file)
             with open(shard_path, "rb") as f:
                 shard = pickle.load(f)
             motif_dict.update(shard)
+        _sanitize_motif_dict(motif_dict, top_k)
         return motif_dict
 
     if isinstance(payload, dict):
+        _sanitize_motif_dict(payload, top_k)
         return payload
     raise ValueError(f"Invalid motif cache format in {save_file}")

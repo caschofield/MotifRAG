@@ -51,6 +51,8 @@ We now train a retriever, employ it for retrieval (inference), and evaluate the 
 The retriever now supports motif-driven tokenization with directed 3-node motifs (triads).
 
 - Motif cache files are saved under `data_files/{dataset}/motif_tokens/`.
+- The preprocessing ignores disconnected-third-node contributions during counting,
+  and excludes low-information triads `003`, `012`, and `102` (mapped to PAD).
 - Motif support is configured in `configs/retriever/{dataset}.yaml` via:
   - `motif.enabled`
   - `motif.backend` (`python` by default)
@@ -98,6 +100,8 @@ Notes:
 - Tune shard flushing with `--shard_size` if needed:
   - `python motif_preprocess.py -d D --num_workers 32 --shard_size 1000`
 - The resulting cache files are saved in `data_files/{dataset}/motif_tokens/`.
+- Cache filenames now include a filter tag suffix (e.g., `_no003_012_102`) to prevent
+  mixing with older caches.
 - If caches are missing, `train.py` and `inference.py` will fail immediately with a clear message.
 
 ### Training

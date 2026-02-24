@@ -3,7 +3,11 @@ import os
 from argparse import ArgumentParser
 
 from src.config.retriever import load_yaml
-from src.dataset.motifs import build_motif_cache_for_split, motif_cache_file
+from src.dataset.motifs import (
+    EXCLUDED_TRIAD_NAMES,
+    build_motif_cache_for_split,
+    motif_cache_file,
+)
 
 
 def parse_splits(splits: str):
@@ -32,6 +36,7 @@ def main(args):
     print(f"start_method: {start_method}")
     print(f"shard_size: {shard_size}")
     print(f"overwrite: {args.overwrite}")
+    print(f"excluded_triads: {sorted(EXCLUDED_TRIAD_NAMES)}")
 
     for split in splits:
         out_file = motif_cache_file(args.dataset, split, top_k=top_k_tokens, backend=backend)
