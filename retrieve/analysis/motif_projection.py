@@ -1,20 +1,16 @@
 import argparse
+import csv
+import gc
 import json
 import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-import pandas as pd
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE, trustworthiness
-import umap.umap_ as umap
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 import numpy as np
 import torch
-
 from networkx.algorithms.triads import TRIAD_NAMES
+from tqdm import tqdm
 
 
 @dataclass
@@ -45,6 +41,7 @@ def _find_motif_weight(state_dict: Dict[str, torch.Tensor]) -> Tuple[str, torch.
     for key, value in state_dict.items():
         if key.endswith("motif_emb.weight"):
             return key, value
+
     raise KeyError(
         "Could not find motif embedding table in checkpoint state_dict "
         "(expected a key ending with 'motif_emb.weight')."
@@ -69,105 +66,154 @@ def _aggregate_from_tokens(
     if len(ids) == 0 or len(wts) == 0:
         return None
 
-    dim = motif_table.shape[1]
-    vec = np.zeros(dim, dtype=np.float32)
-    valid = []
+    vec = np.zeros(motif_table.shape[1], dtype=np.float32)
+    valid_pairs = []
     for token_id, wt in zip(ids, wts):
         token_id = int(token_id)
         wt = float(wt)
         if token_id <= 0 or token_id >= motif_table.shape[0] or wt <= 0:
             continue
-        vec += wt * motif_table[token_id]
-        valid.append((token_id, wt))
+        vec += np.float32(wt) * motif_table[token_id]
+        valid_pairs.append((token_id, wt))
 
-    if len(valid) == 0:
+    if len(valid_pairs) == 0:
         return None
 
-    mass = float(sum(w for _, w in valid))
+    mass = float(sum(w for _, w in valid_pairs))
     if mass > 0:
-        vec /= mass
+        vec /= np.float32(mass)
 
-    dominant = max(valid, key=lambda x: x[1])[0]
-    probs = np.array([w / max(mass, 1e-12) for _, w in valid], dtype=np.float64)
+    dominant = max(valid_pairs, key=lambda x: x[1])[0]
+    probs = np.array([w / max(mass, 1e-12) for _, w in valid_pairs], dtype=np.float64)
     entropy = float(-(probs * np.log(np.clip(probs, 1e-12, 1.0))).sum())
     return vec, dominant, mass, entropy
 
 
-def _extract_instances(
+def _reservoir_add(
+    reservoir: List[MotifInstance],
+    item: MotifInstance,
+    seen_count: int,
+    max_keep: int,
+    rng: np.random.Generator,
+) -> int:
+    if max_keep is None or max_keep <= 0:
+        return seen_count + 1
+
+    seen_count += 1
+    if len(reservoir) < max_keep:
+        reservoir.append(item)
+        return seen_count
+
+    j = int(rng.integers(low=0, high=seen_count))
+    if j < max_keep:
+        reservoir[j] = item
+    return seen_count
+
+
+def _extract_instances_streaming(
     pred_dict: Dict,
     motif_table: np.ndarray,
-) -> List[MotifInstance]:
-    instances: List[MotifInstance] = []
-    for sample_id in sorted(pred_dict.keys(), key=str):
-        sample = pred_dict[sample_id]
+    max_scored: int,
+    max_target: int,
+    seed: int,
+    max_scored_per_sample: int,
+    max_target_per_sample: int,
+) -> Tuple[List[MotifInstance], Dict]:
+    rng = np.random.default_rng(seed)
+    scored_reservoir: List[MotifInstance] = []
+    target_reservoir: List[MotifInstance] = []
+
+    seen_scored = 0
+    seen_target = 0
+    all_counts_scored = Counter()
+    all_counts_target = Counter()
+
+    total = len(pred_dict)
+    pbar = tqdm(total=total, desc="motif-instances", unit="sample")
+    processed = 0
+
+    while len(pred_dict) > 0:
+        sample_id, sample = pred_dict.popitem()
 
         scored_tokens = sample.get("scored_triple_motif_tokens", [])
         scored_triples = sample.get("scored_triples", [])
+        if max_scored_per_sample is not None and max_scored_per_sample > 0:
+            scored_tokens = scored_tokens[:max_scored_per_sample]
+            scored_triples = scored_triples[:max_scored_per_sample]
+
         for i, token_info in enumerate(scored_tokens):
             agg = _aggregate_from_tokens(token_info, motif_table)
             if agg is None:
                 continue
             vec, motif_id, mass, entropy = agg
+            all_counts_scored[motif_id] += 1
+
             triple_score = float("nan")
             if i < len(scored_triples) and len(scored_triples[i]) >= 4:
                 triple_score = float(scored_triples[i][3])
-            instances.append(
-                MotifInstance(
-                    sample_id=str(sample_id),
-                    source="scored",
-                    rank=i + 1,
-                    motif_id=motif_id,
-                    triple_score=triple_score,
-                    token_mass=mass,
-                    token_entropy=entropy,
-                    vector=vec,
-                )
+
+            item = MotifInstance(
+                sample_id=str(sample_id),
+                source="scored",
+                rank=i + 1,
+                motif_id=motif_id,
+                triple_score=triple_score,
+                token_mass=mass,
+                token_entropy=entropy,
+                vector=vec,
             )
+            seen_scored = _reservoir_add(scored_reservoir, item, seen_scored, max_scored, rng)
 
         target_tokens = sample.get("target_relevant_triple_motif_tokens", [])
+        if max_target_per_sample is not None and max_target_per_sample > 0:
+            target_tokens = target_tokens[:max_target_per_sample]
+
         for i, token_info in enumerate(target_tokens):
             agg = _aggregate_from_tokens(token_info, motif_table)
             if agg is None:
                 continue
             vec, motif_id, mass, entropy = agg
-            instances.append(
-                MotifInstance(
-                    sample_id=str(sample_id),
-                    source="target",
-                    rank=i + 1,
-                    motif_id=motif_id,
-                    triple_score=float("nan"),
-                    token_mass=mass,
-                    token_entropy=entropy,
-                    vector=vec,
-                )
+            all_counts_target[motif_id] += 1
+
+            item = MotifInstance(
+                sample_id=str(sample_id),
+                source="target",
+                rank=i + 1,
+                motif_id=motif_id,
+                triple_score=float("nan"),
+                token_mass=mass,
+                token_entropy=entropy,
+                vector=vec,
             )
-    return instances
+            seen_target = _reservoir_add(target_reservoir, item, seen_target, max_target, rng)
 
+        processed += 1
+        pbar.update(1)
 
-def _sample_instances(
-    instances: List[MotifInstance],
-    max_scored: int,
-    max_target: int,
-    seed: int,
-) -> List[MotifInstance]:
-    rng = np.random.default_rng(seed)
-    scored = [x for x in instances if x.source == "scored"]
-    target = [x for x in instances if x.source == "target"]
+        if processed % 500 == 0:
+            gc.collect()
 
-    def _sample(group: List[MotifInstance], k: int) -> List[MotifInstance]:
-        if k is None or k <= 0 or len(group) <= k:
-            return group
-        picked = rng.choice(len(group), size=k, replace=False)
-        picked.sort()
-        return [group[i] for i in picked.tolist()]
+    pbar.close()
 
-    sampled = _sample(scored, max_scored) + _sample(target, max_target)
-    sampled.sort(key=lambda x: (x.sample_id, x.source, x.rank))
-    return sampled
+    instances = scored_reservoir + target_reservoir
+    instances.sort(key=lambda x: (x.sample_id, x.source, x.rank))
+
+    summary = {
+        "num_samples": int(total),
+        "seen_scored_instances": int(seen_scored),
+        "seen_target_instances": int(seen_target),
+        "sampled_scored_instances": int(len(scored_reservoir)),
+        "sampled_target_instances": int(len(target_reservoir)),
+        "all_counts_scored": {str(k): int(v) for k, v in sorted(all_counts_scored.items())},
+        "all_counts_target": {str(k): int(v) for k, v in sorted(all_counts_target.items())},
+    }
+    return instances, summary
 
 
 def _run_pca(x: np.ndarray):
+    from sklearn.decomposition import PCA
+    from sklearn.manifold import trustworthiness
+
     pca = PCA(n_components=2)
     y = pca.fit_transform(x)
     metrics = {
@@ -180,6 +226,8 @@ def _run_pca(x: np.ndarray):
 
 
 def _run_tsne(x: np.ndarray, seed: int, perplexity_hint: float):
+    from sklearn.manifold import TSNE, trustworthiness
+
     if len(x) < 4:
         raise ValueError("t-SNE requires at least 4 points.")
 
@@ -204,6 +252,13 @@ def _run_tsne(x: np.ndarray, seed: int, perplexity_hint: float):
 
 
 def _run_umap(x: np.ndarray, seed: int, n_neighbors_hint: int, min_dist: float):
+    try:
+        import umap.umap_ as umap
+    except Exception as e:
+        raise ImportError("UMAP is unavailable. Install `umap-learn` to enable UMAP projection.") from e
+
+    from sklearn.manifold import trustworthiness
+
     if len(x) < 4:
         raise ValueError("UMAP requires at least 4 points.")
 
@@ -233,7 +288,7 @@ def _project_all(
 ):
     outputs = {}
     metrics = {}
-    for method in methods:
+    for method in tqdm(methods, desc="projections", unit="method"):
         method = method.strip().lower()
         if method == "pca":
             y, met = _run_pca(x)
@@ -271,13 +326,14 @@ def _plot_atlas(
     instances: List[MotifInstance],
     dpi: int,
 ):
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     methods = [m for m in projected.keys()]
     if len(methods) == 0:
         raise ValueError("No successful projections to plot.")
 
     motif_ids = np.arange(1, motif_table.shape[0], dtype=np.int32)
-    motif_vectors = motif_table[1:]
     num_anchor = len(motif_ids)
     num_inst = len(instances)
     all_ids = np.array([x.motif_id for x in instances], dtype=np.int32) if num_inst > 0 else np.array([])
@@ -395,81 +451,110 @@ def _save_projection_table(
     motif_table: np.ndarray,
     instances: List[MotifInstance],
 ):
-
     motif_ids = np.arange(1, motif_table.shape[0], dtype=np.int32)
     num_anchor = len(motif_ids)
-    rows = []
-    for method, coords in projected.items():
-        anchor_xy = coords[:num_anchor]
-        inst_xy = coords[num_anchor:]
+    header = [
+        "method",
+        "point_type",
+        "sample_id",
+        "source",
+        "rank",
+        "motif_id",
+        "triad_name",
+        "triple_score",
+        "token_mass",
+        "token_entropy",
+        "x",
+        "y",
+    ]
 
-        for i, motif_id in enumerate(motif_ids.tolist()):
-            rows.append(
-                {
-                    "method": method,
-                    "point_type": "motif_anchor",
-                    "sample_id": "",
-                    "source": "anchor",
-                    "rank": -1,
-                    "motif_id": motif_id,
-                    "triad_name": _triad_name(motif_id),
-                    "triple_score": np.nan,
-                    "token_mass": np.nan,
-                    "token_entropy": np.nan,
-                    "x": float(anchor_xy[i, 0]),
-                    "y": float(anchor_xy[i, 1]),
-                }
-            )
+    with open(out_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for method, coords in tqdm(projected.items(), desc="writing-csv", unit="method"):
+            anchor_xy = coords[:num_anchor]
+            inst_xy = coords[num_anchor:]
 
-        for i, item in enumerate(instances):
-            rows.append(
-                {
-                    "method": method,
-                    "point_type": "motif_instance",
-                    "sample_id": item.sample_id,
-                    "source": item.source,
-                    "rank": int(item.rank),
-                    "motif_id": int(item.motif_id),
-                    "triad_name": _triad_name(item.motif_id),
-                    "triple_score": float(item.triple_score),
-                    "token_mass": float(item.token_mass),
-                    "token_entropy": float(item.token_entropy),
-                    "x": float(inst_xy[i, 0]),
-                    "y": float(inst_xy[i, 1]),
-                }
-            )
+            for i, motif_id in enumerate(motif_ids.tolist()):
+                writer.writerow([
+                    method,
+                    "motif_anchor",
+                    "",
+                    "anchor",
+                    -1,
+                    motif_id,
+                    _triad_name(motif_id),
+                    "",
+                    "",
+                    "",
+                    float(anchor_xy[i, 0]),
+                    float(anchor_xy[i, 1]),
+                ])
 
-    df = pd.DataFrame(rows)
-    df.to_csv(out_file, index=False)
+            for i, item in enumerate(instances):
+                writer.writerow([
+                    method,
+                    "motif_instance",
+                    item.sample_id,
+                    item.source,
+                    int(item.rank),
+                    int(item.motif_id),
+                    _triad_name(item.motif_id),
+                    float(item.triple_score),
+                    float(item.token_mass),
+                    float(item.token_entropy),
+                    float(inst_xy[i, 0]),
+                    float(inst_xy[i, 1]),
+                ])
 
 
 def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
+    print(f"Loading checkpoint: {args.checkpoint}")
     checkpoint = _torch_load(args.checkpoint)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     motif_key, motif_weight = _find_motif_weight(state_dict)
     motif_table = motif_weight.detach().cpu().numpy().astype(np.float32)
+    del checkpoint
+    gc.collect()
 
     if motif_table.ndim != 2 or motif_table.shape[0] <= 1:
         raise ValueError(f"Invalid motif embedding table shape: {motif_table.shape}")
 
     instances: List[MotifInstance] = []
     retrieval_meta = {"status": "missing"}
+
     if args.retrieval_result is not None and os.path.exists(args.retrieval_result):
+        print(f"Loading retrieval result: {args.retrieval_result}")
         pred_dict = _torch_load(args.retrieval_result)
-        instances = _extract_instances(pred_dict, motif_table)
-        instances = _sample_instances(
-            instances=instances,
+
+        instances, stream_meta = _extract_instances_streaming(
+            pred_dict=pred_dict,
+            motif_table=motif_table,
             max_scored=args.max_scored,
             max_target=args.max_target,
             seed=args.seed,
+            max_scored_per_sample=args.max_scored_per_sample,
+            max_target_per_sample=args.max_target_per_sample,
         )
+
+        del pred_dict
+        gc.collect()
+
         retrieval_meta = {
             "status": "loaded",
-            "num_samples": int(len(pred_dict)),
+            "num_samples": int(stream_meta["num_samples"]),
+            "seen_scored_instances": int(stream_meta["seen_scored_instances"]),
+            "seen_target_instances": int(stream_meta["seen_target_instances"]),
+            "sampled_scored_instances": int(stream_meta["sampled_scored_instances"]),
+            "sampled_target_instances": int(stream_meta["sampled_target_instances"]),
             "num_instances_after_sampling": int(len(instances)),
+            "all_counts_scored": stream_meta["all_counts_scored"],
+            "all_counts_target": stream_meta["all_counts_target"],
         }
+    else:
+        print("No retrieval_result provided; projecting motif anchors only.")
 
     motif_vectors = motif_table[1:]
     if len(instances) > 0:
@@ -490,6 +575,9 @@ def main(args):
         umap_neighbors=args.umap_neighbors,
         umap_min_dist=args.umap_min_dist,
     )
+    del x
+    gc.collect()
+
     if len(projected) == 0:
         raise RuntimeError(f"All projection methods were skipped. Details: {proj_metrics}")
 
@@ -511,8 +599,9 @@ def main(args):
         instances=instances,
     )
 
-    counts_scored = Counter([x.motif_id for x in instances if x.source == "scored"])
-    counts_target = Counter([x.motif_id for x in instances if x.source == "target"])
+    counts_scored = Counter(int(x.motif_id) for x in instances if x.source == "scored")
+    counts_target = Counter(int(x.motif_id) for x in instances if x.source == "target")
+
     metric_payload = {
         "checkpoint": os.path.abspath(args.checkpoint),
         "retrieval_result": None if args.retrieval_result is None else os.path.abspath(args.retrieval_result),
@@ -520,7 +609,7 @@ def main(args):
         "motif_table_shape": [int(v) for v in motif_table.shape],
         "retrieval_meta": retrieval_meta,
         "num_motif_instances": int(len(instances)),
-        "counts_by_source": {
+        "counts_by_sampled_source": {
             "scored": {str(k): int(v) for k, v in sorted(counts_scored.items())},
             "target": {str(k): int(v) for k, v in sorted(counts_target.items())},
         },
@@ -530,6 +619,7 @@ def main(args):
             "projection_csv": os.path.abspath(table_file),
         },
     }
+
     metrics_file = os.path.join(args.output_dir, "motif_embedding_projection_metrics.json")
     with open(metrics_file, "w", encoding="utf-8") as f:
         json.dump(metric_payload, f, indent=2)
@@ -561,8 +651,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--methods", type=str, default="pca,tsne,umap")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max_scored", type=int, default=30000)
-    parser.add_argument("--max_target", type=int, default=30000)
+    parser.add_argument("--max_scored", type=int, default=8000)
+    parser.add_argument("--max_target", type=int, default=8000)
+    parser.add_argument("--max_scored_per_sample", type=int, default=500)
+    parser.add_argument("--max_target_per_sample", type=int, default=500)
     parser.add_argument("--tsne_perplexity", type=float, default=30.0)
     parser.add_argument("--umap_neighbors", type=int, default=15)
     parser.add_argument("--umap_min_dist", type=float, default=0.1)
