@@ -76,7 +76,7 @@ class Retriever(nn.Module):
             pos_node_dim = (2 if topic_pe else 0) + 2 * (
                 DDE_kwargs['num_rounds'] + DDE_kwargs['num_reverse_rounds']
             )
-            neighborhood_in = 2 * emb_size + 2 * motif_emb_dim
+            neighborhood_in = 2 * emb_size
             position_in = 2 * pos_node_dim
             structure_in = emb_size + motif_emb_dim
 
@@ -175,9 +175,9 @@ class Retriever(nn.Module):
 
         h_h = h_e[h_id_tensor]
         h_t = h_e[t_id_tensor]
-        m_h = node_motif_emb[h_id_tensor]
-        m_t = node_motif_emb[t_id_tensor]
-        h_neighborhood = self.neighborhood_head(torch.cat([h_h, h_t, m_h, m_t], dim=1))
+        #m_h = node_motif_emb[h_id_tensor]
+        #m_t = node_motif_emb[t_id_tensor]
+        h_neighborhood = self.neighborhood_head(torch.cat([h_h, h_t], dim=1))
 
         pos_node_features = []
         if self.topic_pe:

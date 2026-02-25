@@ -439,7 +439,7 @@ def _plot_atlas(
         Line2D([0], [0], marker="*", color="w", label="Motif Type Anchor", markerfacecolor="gray", markeredgecolor="black", markersize=10),
     ]
     fig.legend(handles=legend_items, loc="upper center", ncol=3, frameon=False)
-    fig.suptitle("Motif Embedding Atlas (anchors + retrieved motif instances)", y=0.99, fontsize=13)
+    #fig.suptitle("Motif Embedding Atlas (anchors + retrieved motif instances)", y=0.99, fontsize=13)
     fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.93])
     fig.savefig(out_file, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
