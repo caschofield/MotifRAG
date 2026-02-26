@@ -107,11 +107,23 @@ def _run_pca(x: np.ndarray):
     return y, pca.explained_variance_ratio_
 
 
+def _project_selected_with_global_pca(selected: List[Dict]) -> np.ndarray:
+    all_vec = np.concatenate([item["vectors"] for item in selected], axis=0)
+    all_xy, var_ratio = _run_pca(all_vec)
+    start = 0
+    for item in selected:
+        n = item["vectors"].shape[0]
+        item["pca_xy"] = all_xy[start : start + n]
+        start += n
+    return var_ratio
+
+
 def _plot_questions(
     selected: List[Dict],
     out_file: str,
     top_k: int,
     dpi: int,
+    global_var_ratio: np.ndarray,
 ):
     import matplotlib.pyplot as plt
 
@@ -124,7 +136,7 @@ def _plot_questions(
     last_scatter = None
     for i, item in enumerate(selected):
         ax = axes_flat[i]
-        y, var_ratio = _run_pca(item["vectors"])
+        y = item["pca_xy"]
         ranks = np.arange(1, y.shape[0] + 1)
         last_scatter = ax.scatter(
             y[:, 0],
@@ -139,7 +151,7 @@ def _plot_questions(
         if len(q) > 88:
             q = q[:85] + "..."
         ax.set_title(
-            f"{item['sample_id']} | n={y.shape[0]} | var={float(np.sum(var_ratio)):.2f}\n{q}",
+            f"{item['sample_id']} | n={y.shape[0]}\n{q}",
             fontsize=9,
         )
         ax.set_xlabel("PC1")
@@ -154,7 +166,8 @@ def _plot_questions(
         cbar.set_label("Retrieved triple rank (1 = highest score)")
 
     fig.suptitle(
-        f"Per-Question PCA of Top-{top_k} Retrieved Triple Motif Embeddings",
+        f"Per-Question PCA of Top-{top_k} Retrieved Triple Motif Embeddings "
+        f"(global fit, var={float(np.sum(global_var_ratio)):.2f})",
         y=0.995,
         fontsize=13,
     )
@@ -193,8 +206,15 @@ def main(args):
             f"(requested {args.num_questions})."
         )
 
+    global_var_ratio = _project_selected_with_global_pca(selected)
     out_png = os.path.join(args.output_dir, "question_topk_motif_pca.png")
-    _plot_questions(selected=selected, out_file=out_png, top_k=args.top_k, dpi=args.dpi)
+    _plot_questions(
+        selected=selected,
+        out_file=out_png,
+        top_k=args.top_k,
+        dpi=args.dpi,
+        global_var_ratio=global_var_ratio,
+    )
 
     meta = {
         "checkpoint": os.path.abspath(args.checkpoint),
@@ -203,6 +223,7 @@ def main(args):
         "num_selected_questions": int(len(selected)),
         "top_k": int(args.top_k),
         "min_points": int(args.min_points),
+        "global_pca_explained_variance_ratio": [float(v) for v in global_var_ratio.tolist()],
         "selected_questions": [
             {
                 "sample_id": item["sample_id"],
