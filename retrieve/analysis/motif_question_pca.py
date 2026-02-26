@@ -4,9 +4,13 @@ import math
 import os
 from typing import Dict, List, Optional, Tuple
 
+from networkx.algorithms.triads import TRIAD_NAMES
 import numpy as np
 import torch
 from tqdm import tqdm
+
+
+EXCLUDED_TRIADS = {"003", "012", "102"}
 
 
 def _torch_load(path: str):
@@ -104,18 +108,32 @@ def _run_pca(x: np.ndarray):
         raise ValueError("PCA needs at least 2 vectors.")
     pca = PCA(n_components=2)
     y = pca.fit_transform(x)
-    return y, pca.explained_variance_ratio_
+    return y, pca.explained_variance_ratio_, pca
 
 
-def _project_selected_with_global_pca(selected: List[Dict]) -> np.ndarray:
+def _project_selected_with_global_pca(selected: List[Dict], motif_table: np.ndarray):
     all_vec = np.concatenate([item["vectors"] for item in selected], axis=0)
-    all_xy, var_ratio = _run_pca(all_vec)
+    all_xy, var_ratio, pca = _run_pca(all_vec)
     start = 0
     for item in selected:
         n = item["vectors"].shape[0]
         item["pca_xy"] = all_xy[start : start + n]
         start += n
-    return var_ratio
+
+    anchor_names: List[str] = []
+    anchor_vecs: List[np.ndarray] = []
+    for token_id, triad_name in enumerate(TRIAD_NAMES, start=1):
+        if triad_name in EXCLUDED_TRIADS:
+            continue
+        if token_id >= motif_table.shape[0]:
+            continue
+        anchor_names.append(triad_name)
+        anchor_vecs.append(motif_table[token_id])
+
+    if len(anchor_vecs) == 0:
+        raise ValueError("No motif anchors available to project.")
+    anchor_xy = pca.transform(np.stack(anchor_vecs, axis=0))
+    return var_ratio, anchor_names, anchor_xy
 
 
 def _plot_questions(
@@ -124,6 +142,8 @@ def _plot_questions(
     top_k: int,
     dpi: int,
     global_var_ratio: np.ndarray,
+    anchor_names: List[str],
+    anchor_xy: np.ndarray,
 ):
     import matplotlib.pyplot as plt
 
@@ -157,6 +177,27 @@ def _plot_questions(
         ax.set_xlabel("PC1")
         ax.set_ylabel("PC2")
         ax.grid(True, alpha=0.25)
+
+        ax.scatter(
+            anchor_xy[:, 0],
+            anchor_xy[:, 1],
+            marker="*",
+            s=180.0,
+            c="#f1c40f",
+            edgecolors="black",
+            linewidths=0.7,
+            alpha=0.95,
+            zorder=10,
+        )
+        for j, name in enumerate(anchor_names):
+            ax.annotate(
+                name,
+                (anchor_xy[j, 0], anchor_xy[j, 1]),
+                fontsize=7,
+                xytext=(3, 2),
+                textcoords="offset points",
+                zorder=11,
+            )
 
     for j in range(n, len(axes_flat)):
         axes_flat[j].axis("off")
@@ -206,7 +247,7 @@ def main(args):
             f"(requested {args.num_questions})."
         )
 
-    global_var_ratio = _project_selected_with_global_pca(selected)
+    global_var_ratio, anchor_names, anchor_xy = _project_selected_with_global_pca(selected, motif_table)
     out_png = os.path.join(args.output_dir, "question_topk_motif_pca.png")
     _plot_questions(
         selected=selected,
@@ -214,6 +255,8 @@ def main(args):
         top_k=args.top_k,
         dpi=args.dpi,
         global_var_ratio=global_var_ratio,
+        anchor_names=anchor_names,
+        anchor_xy=anchor_xy,
     )
 
     meta = {
@@ -224,6 +267,7 @@ def main(args):
         "top_k": int(args.top_k),
         "min_points": int(args.min_points),
         "global_pca_explained_variance_ratio": [float(v) for v in global_var_ratio.tolist()],
+        "projected_anchor_triad_names": anchor_names,
         "selected_questions": [
             {
                 "sample_id": item["sample_id"],
