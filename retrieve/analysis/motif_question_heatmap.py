@@ -61,39 +61,6 @@ def _parse_motif_names(name_csv: str) -> List[str]:
     return names
 
 
-def _resolve_emb_path(dataset: Optional[str], text_encoder: str, split: str, emb_path: Optional[str]) -> str:
-    if emb_path is not None:
-        return emb_path
-    if dataset is None:
-        raise ValueError("Either --emb_path or --dataset must be provided.")
-    return os.path.join("data_files", dataset, "emb", text_encoder, f"{split}.pth")
-
-
-def _resolve_key(d: Dict, sample_id: str):
-    candidates = [sample_id]
-    try:
-        i = int(sample_id)
-        candidates.extend([i, str(i)])
-    except Exception:
-        pass
-    for k in candidates:
-        if k in d:
-            return k
-    return None
-
-
-def _to_numpy_q_emb(q_emb) -> np.ndarray:
-    if isinstance(q_emb, torch.Tensor):
-        arr = q_emb.detach().cpu().float().numpy()
-    else:
-        arr = np.asarray(q_emb, dtype=np.float32)
-    if arr.ndim == 2 and arr.shape[0] == 1:
-        arr = arr[0]
-    if arr.ndim != 1:
-        arr = arr.reshape(-1)
-    return arr.astype(np.float32)
-
-
 def _sample_retrieved_motif_distribution(
     sample: Dict,
     top_k: int,
@@ -146,9 +113,10 @@ def _collect_motif_distributions(
     top_k: int,
     use_scores: bool,
     excluded_token_ids: set,
-) -> Tuple[List[str], np.ndarray]:
+) -> Tuple[List[str], np.ndarray, Dict[str, str]]:
     sample_ids: List[str] = []
     distributions: List[np.ndarray] = []
+    question_text_by_id: Dict[str, str] = {}
 
     total = len(retrieval_result)
     pbar = tqdm(total=total, desc="motif-dist", unit="sample")
@@ -161,39 +129,53 @@ def _collect_motif_distributions(
             excluded_token_ids=excluded_token_ids,
         )
         if dist is not None:
-            sample_ids.append(str(sample_id))
+            sid = str(sample_id)
+            sample_ids.append(sid)
             distributions.append(dist)
+            question_text_by_id[sid] = str(sample.get("question", ""))
         pbar.update(1)
     pbar.close()
 
     if len(distributions) == 0:
         raise ValueError("No valid motif distributions were extracted from retrieval_result.")
 
-    return sample_ids, np.stack(distributions, axis=0).astype(np.float64)
+    return sample_ids, np.stack(distributions, axis=0).astype(np.float64), question_text_by_id
 
 
-def _collect_question_embeddings(sample_ids: Sequence[str], emb_dict: Dict) -> Tuple[List[str], np.ndarray]:
+def _collect_question_text_embeddings(
+    sample_ids: Sequence[str],
+    question_text_by_id: Dict[str, str],
+    hash_dim: int,
+    ngram_max: int,
+):
+    try:
+        from sklearn.feature_extraction.text import HashingVectorizer, TfidfTransformer
+    except Exception as e:
+        raise ImportError("scikit-learn is required for hashing/tfidf question embeddings.") from e
+
     kept_ids: List[str] = []
-    q_emb_list: List[np.ndarray] = []
-    pbar = tqdm(sample_ids, desc="q-emb", unit="sample")
-    for sample_id in pbar:
-        key = _resolve_key(emb_dict, sample_id)
-        if key is None:
-            continue
-        entry = emb_dict.get(key, {})
-        if "q_emb" not in entry:
-            continue
-        q_vec = _to_numpy_q_emb(entry["q_emb"])
-        if q_vec.size == 0 or (not np.all(np.isfinite(q_vec))):
+    texts: List[str] = []
+    for sample_id in tqdm(sample_ids, desc="q-text", unit="sample"):
+        text = question_text_by_id.get(sample_id, "")
+        if len(text.strip()) == 0:
             continue
         kept_ids.append(sample_id)
-        q_emb_list.append(q_vec)
+        texts.append(text)
 
-    if len(q_emb_list) == 0:
-        raise ValueError("No question embeddings matched the retrieval samples.")
-    x = np.stack(q_emb_list, axis=0).astype(np.float32)
-    x /= np.clip(np.linalg.norm(x, axis=1, keepdims=True), 1e-12, None)
-    return kept_ids, x
+    if len(texts) == 0:
+        raise ValueError("No question texts were found for hashing/tfidf embeddings.")
+
+    vectorizer = HashingVectorizer(
+        n_features=int(hash_dim),
+        alternate_sign=False,
+        norm=None,
+        ngram_range=(1, max(1, int(ngram_max))),
+        lowercase=True,
+    )
+    x_counts = vectorizer.transform(tqdm(texts, desc="hashing", unit="question"))
+    tfidf = TfidfTransformer(norm="l2")
+    x_tfidf = tfidf.fit_transform(x_counts)
+    return kept_ids, x_tfidf
 
 
 def _build_cluster_motif_stats(
@@ -255,7 +237,7 @@ def main(args):
         excluded_triads = set(DISCONNECTED_TRIADS)
     excluded_token_ids = {TRIAD_NAMES.index(name) + 1 for name in excluded_triads}
 
-    sample_ids, motif_mass = _collect_motif_distributions(
+    sample_ids, motif_mass, question_text_by_id = _collect_motif_distributions(
         retrieval_result=retrieval_result,
         top_k=args.top_k,
         use_scores=(not args.uniform_triple_weight),
@@ -266,17 +248,13 @@ def main(args):
 
     mass_by_sample_id = {sample_id: motif_mass[i] for i, sample_id in enumerate(sample_ids)}
 
-    emb_path = _resolve_emb_path(
-        dataset=args.dataset,
-        text_encoder=args.text_encoder,
-        split=args.split,
-        emb_path=args.emb_path,
+    print("Building question embeddings from question text (hashing+tfidf)")
+    kept_ids, q_emb = _collect_question_text_embeddings(
+        sample_ids=sample_ids,
+        question_text_by_id=question_text_by_id,
+        hash_dim=args.hash_dim,
+        ngram_max=args.ngram_max,
     )
-    print(f"Loading question embeddings: {emb_path}")
-    emb_dict = _torch_load(emb_path)
-    kept_ids, q_emb = _collect_question_embeddings(sample_ids=sample_ids, emb_dict=emb_dict)
-    del emb_dict
-    gc.collect()
 
     aligned_mass = np.stack([mass_by_sample_id[sample_id] for sample_id in kept_ids], axis=0)
 
@@ -358,7 +336,8 @@ def main(args):
 
     summary = {
         "retrieval_result": os.path.abspath(args.retrieval_result),
-        "emb_path": os.path.abspath(emb_path),
+        "question_embed_backend": "hashing",
+        "emb_path": None,
         "num_samples_with_motif_mass": int(len(sample_ids)),
         "num_samples_with_q_emb": int(len(kept_ids)),
         "k": int(k),
@@ -394,29 +373,16 @@ if __name__ == "__main__":
         help="Path to retrieval_result.pth from inference.",
     )
     parser.add_argument(
-        "-d",
-        "--dataset",
-        type=str,
-        default=None,
-        help="Dataset name (used to auto-resolve emb path when --emb_path is not provided).",
+        "--hash_dim",
+        type=int,
+        default=8192,
+        help="Feature dimension for hashing question embeddings.",
     )
     parser.add_argument(
-        "--split",
-        type=str,
-        default="test",
-        help="Dataset split for question embeddings.",
-    )
-    parser.add_argument(
-        "--text_encoder",
-        type=str,
-        default="gte-large-en-v1.5",
-        help="Text encoder name for embedding path resolution.",
-    )
-    parser.add_argument(
-        "--emb_path",
-        type=str,
-        default=None,
-        help="Optional explicit path to precomputed question embeddings .pth.",
+        "--ngram_max",
+        type=int,
+        default=2,
+        help="Max n-gram order for hashing question embeddings.",
     )
     parser.add_argument(
         "--output_dir",
