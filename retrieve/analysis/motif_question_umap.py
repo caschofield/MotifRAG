@@ -126,14 +126,28 @@ def _choose_questions(
     return chosen
 
 
-def _run_anchor_pca(anchor_vecs: np.ndarray):
-    from sklearn.decomposition import PCA
+def _run_anchor_umap(anchor_vecs: np.ndarray, n_neighbors: int, min_dist: float, metric: str, seed: int):
+    try:
+        import umap
+    except ImportError as e:
+        raise ImportError(
+            "UMAP is not installed. Install it with `pip install umap-learn`."
+        ) from e
 
-    if anchor_vecs.shape[0] < 2:
-        raise ValueError("PCA needs at least 2 motif embeddings.")
-    pca = PCA(n_components=2)
-    anchor_xy = pca.fit_transform(anchor_vecs)
-    return anchor_xy, pca.explained_variance_ratio_
+    n = anchor_vecs.shape[0]
+    if n < 3:
+        raise ValueError("UMAP needs at least 3 motif embeddings.")
+    used_neighbors = int(max(2, min(n_neighbors, n - 1)))
+
+    reducer = umap.UMAP(
+        n_components=2,
+        n_neighbors=used_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=seed,
+    )
+    anchor_xy = reducer.fit_transform(anchor_vecs)
+    return anchor_xy, used_neighbors
 
 
 def _plot_questions(
@@ -141,7 +155,6 @@ def _plot_questions(
     out_file: str,
     top_k: int,
     dpi: int,
-    global_var_ratio: np.ndarray,
     anchor_names: List[str],
     anchor_xy: np.ndarray,
 ):
@@ -174,8 +187,8 @@ def _plot_questions(
             f"{item['sample_id']} | n={y.shape[0]}\n{q}",
             fontsize=9,
         )
-        ax.set_xlabel("PC1")
-        ax.set_ylabel("PC2")
+        ax.set_xlabel("UMAP-1")
+        ax.set_ylabel("UMAP-2")
         ax.grid(True, alpha=0.25)
 
         ax.scatter(
@@ -210,8 +223,8 @@ def _plot_questions(
         cbar.set_label("Retrieved triple rank (1 = highest score)")
 
     fig.suptitle(
-        f"Per-Question PCA of Top-{top_k} Retrieved Triple Motif Embeddings "
-        f"(fit on motif anchors only, var={float(np.sum(global_var_ratio)):.2f})",
+        f"Per-Question UMAP of Top-{top_k} Retrieved Triple Motif Embeddings "
+        f"(fit on motif anchors only)",
         y=0.995,
         fontsize=13,
     )
@@ -231,7 +244,13 @@ def main(args):
     del checkpoint
 
     token_ids, anchor_names, anchor_vecs = _collect_anchor_embeddings(motif_table)
-    anchor_xy, global_var_ratio = _run_anchor_pca(anchor_vecs)
+    anchor_xy, used_neighbors = _run_anchor_umap(
+        anchor_vecs,
+        n_neighbors=args.n_neighbors,
+        min_dist=args.min_dist,
+        metric=args.metric,
+        seed=args.seed,
+    )
     anchor_xy_lookup = _build_anchor_xy_lookup(token_ids, anchor_xy)
 
     print(f"Loading retrieval result: {args.retrieval_result}")
@@ -254,13 +273,12 @@ def main(args):
             f"(requested {args.num_questions})."
         )
 
-    out_png = os.path.join(args.output_dir, "question_topk_motif_pca.png")
+    out_png = os.path.join(args.output_dir, "question_topk_motif_umap.png")
     _plot_questions(
         selected=selected,
         out_file=out_png,
         top_k=args.top_k,
         dpi=args.dpi,
-        global_var_ratio=global_var_ratio,
         anchor_names=anchor_names,
         anchor_xy=anchor_xy,
     )
@@ -273,7 +291,13 @@ def main(args):
         "top_k": int(args.top_k),
         "min_points": int(args.min_points),
         "fit_basis": "motif_anchors_only",
-        "global_pca_explained_variance_ratio": [float(v) for v in global_var_ratio.tolist()],
+        "umap": {
+            "n_neighbors": int(args.n_neighbors),
+            "n_neighbors_used": int(used_neighbors),
+            "min_dist": float(args.min_dist),
+            "metric": str(args.metric),
+            "seed": int(args.seed),
+        },
         "projected_anchor_triad_names": anchor_names,
         "selected_questions": [
             {
@@ -285,7 +309,7 @@ def main(args):
         ],
         "output_png": os.path.abspath(out_png),
     }
-    out_json = os.path.join(args.output_dir, "question_topk_motif_pca.json")
+    out_json = os.path.join(args.output_dir, "question_topk_motif_umap.json")
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
@@ -294,7 +318,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("Per-question PCA of retrieved triple motif embeddings")
+    parser = argparse.ArgumentParser("Per-question UMAP of retrieved triple motif embeddings")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint.")
     parser.add_argument("--retrieval_result", type=str, required=True, help="Path to retrieval_result.pth")
     parser.add_argument("--output_dir", type=str, default="analysis/motif_projection")
@@ -302,5 +326,8 @@ if __name__ == "__main__":
     parser.add_argument("--top_k", type=int, default=100, help="Top-K retrieved triples per question.")
     parser.add_argument("--min_points", type=int, default=30, help="Minimum valid motif points per question.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n_neighbors", type=int, default=8)
+    parser.add_argument("--min_dist", type=float, default=0.1)
+    parser.add_argument("--metric", type=str, default="cosine")
     parser.add_argument("--dpi", type=int, default=260)
     main(parser.parse_args())
