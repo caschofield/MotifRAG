@@ -2,7 +2,7 @@ import argparse
 import gc
 import json
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -139,27 +139,18 @@ def _collect_pairs(
     return sample_ids, q_mat, y_mat, drop_stats
 
 
-def _sample_random_candidate_motif_distribution(
-    motif_entry: Dict,
-    random_k: int,
+def _accumulate_from_rows(
+    ids_rows: np.ndarray,
+    wts_rows: np.ndarray,
+    selected_rows: np.ndarray,
     excluded_token_ids: set,
-    rng: np.random.Generator,
 ) -> Optional[np.ndarray]:
-    triple_ids = motif_entry.get("triple_motif_token_ids", [])
-    triple_wts = motif_entry.get("triple_motif_token_wts", [])
-    n = len(triple_ids)
-    if n == 0:
-        return None
-
-    if random_k > 0 and n > random_k:
-        selected = rng.choice(n, size=random_k, replace=False)
-    else:
-        selected = np.arange(n, dtype=np.int64)
-
     motif_mass = np.zeros(MOTIF_VOCAB_SIZE, dtype=np.float64)
     total_mass = 0.0
-    for idx in selected.tolist():
-        for token_id, wt in zip(triple_ids[idx], triple_wts[idx]):
+    for row_idx in selected_rows.tolist():
+        row_ids = ids_rows[row_idx]
+        row_wts = wts_rows[row_idx]
+        for token_id, wt in zip(row_ids, row_wts):
             token_id = int(token_id)
             wt = float(wt)
             if token_id <= 0 or token_id >= MOTIF_VOCAB_SIZE:
@@ -175,6 +166,24 @@ def _sample_random_candidate_motif_distribution(
         return None
     motif_mass /= total_mass
     return motif_mass.astype(np.float32)
+
+
+def _sample_random_candidate_motif_distribution(
+    motif_entry: Dict,
+    random_k: int,
+    excluded_token_ids: set,
+    rng: np.random.Generator,
+) -> Optional[np.ndarray]:
+    ids_rows = np.asarray(motif_entry.get("triple_motif_token_ids", []), dtype=np.int64)
+    wts_rows = np.asarray(motif_entry.get("triple_motif_token_wts", []), dtype=np.float32)
+    n = ids_rows.shape[0] if ids_rows.ndim == 2 else 0
+    if n == 0:
+        return None
+    if random_k > 0 and n > random_k:
+        selected = rng.choice(n, size=random_k, replace=False)
+    else:
+        selected = np.arange(n, dtype=np.int64)
+    return _accumulate_from_rows(ids_rows, wts_rows, selected, excluded_token_ids)
 
 
 def _infer_dataset_split_from_q_emb_file(q_emb_file: str):
@@ -193,7 +202,62 @@ def _infer_dataset_split_from_q_emb_file(q_emb_file: str):
     return dataset_name, split
 
 
-def _build_random_candidate_matrix(
+def _parse_pool_splits(pool_splits_csv: str) -> List[str]:
+    out = [x.strip() for x in pool_splits_csv.split(",") if len(x.strip()) > 0]
+    if len(out) == 0:
+        raise ValueError("pool_splits is empty.")
+    for s in out:
+        if s not in {"train", "val", "test"}:
+            raise ValueError(f"Invalid split in pool_splits: {s}")
+    return out
+
+
+def _build_global_pool_rows(
+    dataset_name: str,
+    pool_splits: List[str],
+    motif_top_k_tokens: int,
+    motif_backend: str,
+):
+    ids_chunks = []
+    wts_chunks = []
+    total_entries = 0
+
+    for split in pool_splits:
+        motif_dict = load_motif_cache(
+            dataset_name=dataset_name,
+            split=split,
+            top_k=motif_top_k_tokens,
+            backend=motif_backend,
+        )
+        for entry in tqdm(motif_dict.values(), desc=f"pool:{split}", unit="sample"):
+            ids_rows = np.asarray(entry.get("triple_motif_token_ids", []), dtype=np.int16)
+            wts_rows = np.asarray(entry.get("triple_motif_token_wts", []), dtype=np.float32)
+            if ids_rows.ndim != 2 or ids_rows.shape[0] == 0:
+                continue
+            ids_chunks.append(ids_rows)
+            wts_chunks.append(wts_rows)
+            total_entries += 1
+        del motif_dict
+        gc.collect()
+
+    if len(ids_chunks) == 0:
+        raise ValueError("Global random pool is empty. Check motif cache files.")
+
+    pool_ids = np.concatenate(ids_chunks, axis=0).astype(np.int16, copy=False)
+    pool_wts = np.concatenate(wts_chunks, axis=0).astype(np.float32, copy=False)
+    del ids_chunks
+    del wts_chunks
+    gc.collect()
+
+    return pool_ids, pool_wts, {
+        "pool_source": "global_pool",
+        "pool_splits": pool_splits,
+        "pool_num_samples": int(total_entries),
+        "pool_num_triples": int(pool_ids.shape[0]),
+    }
+
+
+def _build_random_matrix_query_subgraph(
     sample_ids: list,
     q_mat: np.ndarray,
     y_retrieved: np.ndarray,
@@ -211,14 +275,13 @@ def _build_random_candidate_matrix(
         top_k=motif_top_k_tokens,
         backend=motif_backend,
     )
-
     rng = np.random.default_rng(seed)
     keep_idx = []
     y_rand = []
     dropped_missing_sample = 0
     dropped_empty_random = 0
 
-    for i, sid in enumerate(tqdm(sample_ids, desc="random-candidate", unit="sample")):
+    for i, sid in enumerate(tqdm(sample_ids, desc="random:query-subgraph", unit="sample")):
         entry = motif_dict.get(sid)
         if entry is None:
             try:
@@ -245,20 +308,77 @@ def _build_random_candidate_matrix(
 
     if len(keep_idx) == 0:
         raise ValueError(
-            "No valid random-candidate motif distributions were built. "
-            f"dropped_missing_sample={dropped_missing_sample}, dropped_empty_random={dropped_empty_random}"
+            "No valid random candidate motif distributions were built "
+            f"(query_subgraph mode): missing={dropped_missing_sample}, empty={dropped_empty_random}"
         )
 
     keep_idx = np.asarray(keep_idx, dtype=np.int64)
-    q_keep = q_mat[keep_idx]
-    y_retrieved_keep = y_retrieved[keep_idx]
-    y_rand_mat = np.stack(y_rand, axis=0).astype(np.float32)
-    random_stats = {
-        "dropped_missing_sample": int(dropped_missing_sample),
+    return (
+        q_mat[keep_idx],
+        y_retrieved[keep_idx],
+        np.stack(y_rand, axis=0).astype(np.float32),
+        {
+            "random_source": "query_subgraph",
+            "dropped_missing_sample": int(dropped_missing_sample),
+            "dropped_empty_random": int(dropped_empty_random),
+            "num_pairs_with_random_candidate": int(len(keep_idx)),
+        },
+    )
+
+
+def _build_random_matrix_global_pool(
+    q_mat: np.ndarray,
+    y_retrieved: np.ndarray,
+    dataset_name: str,
+    pool_splits: List[str],
+    motif_top_k_tokens: int,
+    motif_backend: str,
+    random_k: int,
+    excluded_token_ids: set,
+    seed: int,
+):
+    pool_ids, pool_wts, pool_stats = _build_global_pool_rows(
+        dataset_name=dataset_name,
+        pool_splits=pool_splits,
+        motif_top_k_tokens=motif_top_k_tokens,
+        motif_backend=motif_backend,
+    )
+    rng = np.random.default_rng(seed)
+    n_pool = pool_ids.shape[0]
+    if n_pool == 0:
+        raise ValueError("Global random pool has zero triples.")
+
+    y_rand = []
+    dropped_empty_random = 0
+    n_query = q_mat.shape[0]
+    for _ in tqdm(range(n_query), desc="random:global-pool", unit="sample"):
+        if random_k > 0 and n_pool > random_k:
+            selected = rng.choice(n_pool, size=random_k, replace=False)
+        else:
+            selected = np.arange(n_pool, dtype=np.int64)
+        dist = _accumulate_from_rows(pool_ids, pool_wts, selected, excluded_token_ids)
+        if dist is None:
+            dropped_empty_random += 1
+            continue
+        y_rand.append(dist)
+
+    del pool_ids
+    del pool_wts
+    gc.collect()
+
+    if len(y_rand) != n_query:
+        raise ValueError(
+            "Failed to build random distributions for all queries in global_pool mode. "
+            f"dropped_empty_random={dropped_empty_random}"
+        )
+
+    stats = {
+        "random_source": "global_pool",
         "dropped_empty_random": int(dropped_empty_random),
-        "num_pairs_with_random_candidate": int(len(keep_idx)),
+        "num_pairs_with_random_candidate": int(n_query),
+        **pool_stats,
     }
-    return q_keep, y_retrieved_keep, y_rand_mat, random_stats
+    return q_mat, y_retrieved, np.stack(y_rand, axis=0).astype(np.float32), stats
 
 
 def _pairwise_euclidean(x: np.ndarray) -> np.ndarray:
@@ -348,18 +468,35 @@ def main(args):
             "Likely cause: retrieval_result split and q_emb split mismatch."
         )
 
-    q_keep, y_retrieved_keep, y_rand_mat, random_stats = _build_random_candidate_matrix(
-        sample_ids=sample_ids,
-        q_mat=q_mat,
-        y_retrieved=y_mat,
-        dataset_name=dataset_name,
-        split=split,
-        motif_top_k_tokens=args.motif_top_k_tokens,
-        motif_backend=args.motif_backend,
-        random_k=args.top_k,
-        excluded_token_ids=excluded_token_ids,
-        seed=args.seed,
-    )
+    random_source = args.random_source.strip().lower()
+    if random_source == "query_subgraph":
+        q_keep, y_retrieved_keep, y_rand_mat, random_stats = _build_random_matrix_query_subgraph(
+            sample_ids=sample_ids,
+            q_mat=q_mat,
+            y_retrieved=y_mat,
+            dataset_name=dataset_name,
+            split=split,
+            motif_top_k_tokens=args.motif_top_k_tokens,
+            motif_backend=args.motif_backend,
+            random_k=args.top_k,
+            excluded_token_ids=excluded_token_ids,
+            seed=args.seed,
+        )
+    elif random_source == "global_pool":
+        pool_splits = _parse_pool_splits(args.pool_splits)
+        q_keep, y_retrieved_keep, y_rand_mat, random_stats = _build_random_matrix_global_pool(
+            q_mat=q_mat,
+            y_retrieved=y_mat,
+            dataset_name=dataset_name,
+            pool_splits=pool_splits,
+            motif_top_k_tokens=args.motif_top_k_tokens,
+            motif_backend=args.motif_backend,
+            random_k=args.top_k,
+            excluded_token_ids=excluded_token_ids,
+            seed=args.seed,
+        )
+    else:
+        raise ValueError(f"Unsupported random_source: {args.random_source}")
 
     print(f"Paired samples used (retrieved/random aligned): {q_keep.shape[0]}")
     print(f"q_emb dim: {q_keep.shape[1]} | motif dim: {y_retrieved_keep.shape[1]}")
@@ -382,6 +519,7 @@ def main(args):
         "motif_backend": args.motif_backend,
         "motif_top_k_tokens": int(args.motif_top_k_tokens),
         "top_k": int(args.top_k),
+        "random_source": random_source,
         "num_queries_total": int(total_queries),
         "num_pairs_used": int(q_keep.shape[0]),
         "num_permutations": int(args.num_permutations),
@@ -421,10 +559,12 @@ if __name__ == "__main__":
     parser.add_argument("--retrieval_result", type=str, required=True, help="Path to retrieval_result.pth")
     parser.add_argument("--q_emb_file", type=str, required=True, help="Path to emb/.../{split}.pth containing q_emb by sample id")
     parser.add_argument("--dataset", type=str, default="", choices=["", "webqsp", "cwq"], help="Dataset name for motif cache (auto-infer if omitted)")
-    parser.add_argument("--split", type=str, default="", choices=["", "train", "val", "test"], help="Split name for motif cache (auto-infer if omitted)")
+    parser.add_argument("--split", type=str, default="", choices=["", "train", "val", "test"], help="Split name for query_subgraph random mode (auto-infer if omitted)")
     parser.add_argument("--motif_backend", type=str, default="python", help="Motif cache backend tag")
     parser.add_argument("--motif_top_k_tokens", type=int, default=4, help="Motif top-k setting used in motif_preprocess")
     parser.add_argument("--top_k", type=int, default=100, help="K for retrieved triples and random candidate triples")
+    parser.add_argument("--random_source", type=str, default="global_pool", choices=["global_pool", "query_subgraph"], help="Random baseline source")
+    parser.add_argument("--pool_splits", type=str, default="train,val,test", help="Comma-separated splits for global_pool source")
     parser.add_argument("--num_permutations", type=int, default=300, help="Permutation count for query-shuffled null")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--uniform_triple_weight", action="store_true", help="Use uniform triple weight instead of score-weighted motif mass")
