@@ -1,8 +1,6 @@
 import os
 import pickle
 from collections import Counter, defaultdict
-from concurrent.futures import ProcessPoolExecutor
-import multiprocessing as mp
 from typing import Dict, List, Tuple, Any
 
 import networkx as nx
@@ -13,6 +11,7 @@ PAD_TOKEN_ID = 0
 EXCLUDED_TRIAD_NAMES = {"003", "012", "102"}
 EXCLUDED_TOKEN_IDS = {TRIAD_NAMES.index(name) + 1 for name in EXCLUDED_TRIAD_NAMES}
 MOTIF_CACHE_FILTER_TAG = "no003_012_102"
+MOTIF_BACKEND_TAG = "python"
 INCLUDE_DISCONNECTED_CONTRIBUTIONS = False
 MOTIF_VOCAB_SIZE = 1 + len(TRIAD_NAMES)  # +1 for PAD
 
@@ -117,11 +116,11 @@ def _counter_to_topk(counter: Counter, top_k: int) -> Tuple[List[int], List[floa
     return ids, wts
 
 
-def motif_cache_file(dataset_name: str, split: str, top_k: int = 4, backend: str = "python") -> str:
+def motif_cache_file(dataset_name: str, split: str, top_k: int = 4) -> str:
     save_dir = os.path.join("data_files", dataset_name, "motif_tokens")
     return os.path.join(
         save_dir,
-        f"{split}_triad3_top{top_k}_{backend}_{MOTIF_CACHE_FILTER_TAG}.pth",
+        f"{split}_triad3_top{top_k}_{MOTIF_BACKEND_TAG}_{MOTIF_CACHE_FILTER_TAG}.pth",
     )
 
 
@@ -161,13 +160,7 @@ def _count_motifs_for_pair(
     return counter
 
 
-def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4, backend: str = "python", orca_path: str = "") -> Dict:
-    if backend == "orca":
-        if not orca_path or not os.path.exists(orca_path):
-            backend = "python"
-        else:
-            backend = "python"
-
+def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4) -> Dict:
     h_id_list = sample["h_id_list"]
     t_id_list = sample["t_id_list"]
     num_entities = sample.get("num_entities")
@@ -237,24 +230,6 @@ def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4, backend: str = "
     return entry
 
 
-def _build_single(args):
-    sample_payload, top_k, backend, orca_path = args
-    return sample_payload["id"], build_motif_tokens_for_sample(
-        sample=sample_payload,
-        top_k=top_k,
-        backend=backend,
-        orca_path=orca_path,
-    )
-
-
-def _worker_init():
-    # Prevent thread oversubscription and improve multiprocessing stability on HPC.
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-
-
 def _minimal_payload(sample: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": sample["id"],
@@ -273,19 +248,15 @@ def build_motif_cache_for_split(
     dataset_name: str,
     split: str,
     top_k: int = 4,
-    backend: str = "python",
-    orca_path: str = "",
-    num_workers: int = 1,
-    start_method: str = "spawn",
     shard_size: int = 2000,
     overwrite: bool = False,
 ) -> str:
-    save_file = motif_cache_file(dataset_name, split, top_k=top_k, backend=backend)
+    save_file = motif_cache_file(dataset_name, split, top_k=top_k)
     save_dir = os.path.dirname(save_file)
     os.makedirs(save_dir, exist_ok=True)
     shard_dir = os.path.join(
         save_dir,
-        f"{split}_triad3_top{top_k}_{backend}_{MOTIF_CACHE_FILTER_TAG}.shards",
+        f"{split}_triad3_top{top_k}_{MOTIF_BACKEND_TAG}_{MOTIF_CACHE_FILTER_TAG}.shards",
     )
 
     if (not overwrite) and os.path.exists(save_file):
@@ -324,36 +295,16 @@ def build_motif_cache_for_split(
         shard_idx += 1
         shard_data = {}
 
-    if num_workers <= 1:
-        for i, sample_payload in enumerate(tqdm(processed_dict_list, total=num_samples, desc=f"motifs:{split}")):
-            sample_id, motif_entry = _build_single((sample_payload, top_k, backend, orca_path))
-            shard_data[sample_id] = motif_entry
-            processed_dict_list[i] = None
-            if len(shard_data) >= shard_size:
-                flush_shard()
-    else:
-        work_items = ((sample_payload, top_k, backend, orca_path) for sample_payload in processed_dict_list)
-        try:
-            ctx = mp.get_context(start_method)
-            with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_init) as ex:
-                for sample_id, motif_entry in tqdm(
-                    ex.map(_build_single, work_items, chunksize=32),
-                    total=num_samples,
-                    desc=f"motifs:{split}",
-                ):
-                    shard_data[sample_id] = motif_entry
-                    if len(shard_data) >= shard_size:
-                        flush_shard()
-        except (PermissionError, OSError) as e:
-            print(f"[motif_preprocess] multiprocessing unavailable ({e}). Falling back to single worker.")
-            for i, sample_payload in enumerate(tqdm(processed_dict_list, total=num_samples, desc=f"motifs:{split}:fallback")):
-                if sample_payload is None:
-                    continue
-                sample_id, motif_entry = _build_single((sample_payload, top_k, backend, orca_path))
-                shard_data[sample_id] = motif_entry
-                processed_dict_list[i] = None
-                if len(shard_data) >= shard_size:
-                    flush_shard()
+    for i, sample_payload in enumerate(tqdm(processed_dict_list, total=num_samples, desc=f"motifs:{split}")):
+        sample_id = sample_payload["id"]
+        motif_entry = build_motif_tokens_for_sample(
+            sample=sample_payload,
+            top_k=top_k,
+        )
+        shard_data[sample_id] = motif_entry
+        processed_dict_list[i] = None
+        if len(shard_data) >= shard_size:
+            flush_shard()
     flush_shard()
     del processed_dict_list
 
@@ -362,7 +313,7 @@ def build_motif_cache_for_split(
         "dataset_name": dataset_name,
         "split": split,
         "top_k": top_k,
-        "backend": backend,
+        "backend": MOTIF_BACKEND_TAG,
         "filter_tag": MOTIF_CACHE_FILTER_TAG,
         "excluded_triad_names": sorted(list(EXCLUDED_TRIAD_NAMES)),
         "num_samples": num_samples,
@@ -374,8 +325,8 @@ def build_motif_cache_for_split(
     return save_file
 
 
-def load_motif_cache(dataset_name: str, split: str, top_k: int = 4, backend: str = "python") -> Dict:
-    save_file = motif_cache_file(dataset_name, split, top_k=top_k, backend=backend)
+def load_motif_cache(dataset_name: str, split: str, top_k: int = 4) -> Dict:
+    save_file = motif_cache_file(dataset_name, split, top_k=top_k)
     if not os.path.exists(save_file):
         raise FileNotFoundError(save_file)
 
@@ -394,7 +345,7 @@ def load_motif_cache(dataset_name: str, split: str, top_k: int = 4, backend: str
         shard_suffix = f"_{filter_tag}" if filter_tag else ""
         shard_dir = os.path.join(
             base_dir,
-            f"{payload.get('split')}_triad3_top{payload.get('top_k')}_{payload.get('backend')}{shard_suffix}.shards",
+            f"{payload.get('split')}_triad3_top{payload.get('top_k')}_{payload.get('backend', MOTIF_BACKEND_TAG)}{shard_suffix}.shards",
         )
         for shard_file in payload.get("shard_files", []):
             shard_path = shard_file if os.path.isabs(shard_file) else os.path.join(shard_dir, shard_file)

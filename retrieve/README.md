@@ -55,11 +55,8 @@ The retriever now supports motif-driven tokenization with directed 3-node motifs
   and excludes low-information triads `003`, `012`, and `102` (mapped to PAD).
 - Motif support is configured in `configs/retriever/{dataset}.yaml` via:
   - `motif.enabled`
-  - `motif.backend` (`python` by default)
   - `motif.top_k_tokens` (`4` by default)
   - `motif.motif_emb_dim` (`64` by default)
-- Optional ORCA integration is scaffolded through `motif.backend=orca` and `motif.orca_path`.
-  If unavailable, the code falls back to the Python implementation.
 - Motif computation is now **offline only**. `RetrieverDataset` loads cache files and fails fast if they are missing.
 - Retrieval outputs keep backward compatibility and append:
   - `scored_triple_motif_tokens`
@@ -85,20 +82,18 @@ pip install pyg_lib==0.3.1 torch_scatter==2.1.2 torch_sparse==0.6.18 -f https://
 Before training/inference with motif retrieval enabled, generate motif caches:
 
 ```bash
-python motif_preprocess.py -d D --splits train,val,test --num_workers 32
+python motif_preprocess.py -d D --splits train,val,test
 ```
 
 where `D` is one of the supported datasets.
 
 Notes:
 
-- This step is parallelized across samples and uses a neighbor-based motif counter.
-- Worker payloads are minimal (`id`, `h_id_list`, `t_id_list`, `num_entities`) to reduce IPC memory.
+- This step is single-process and uses a neighbor-based motif counter.
+- The preprocessor keeps only minimal per-sample payloads (`id`, `h_id_list`, `t_id_list`, `num_entities`) to reduce memory.
 - Results are stream-written into shard files to avoid large in-memory accumulation.
-- On HPC, keep the multiprocessing start method as `spawn` (default) to avoid `fork` deadlocks:
-  - `python motif_preprocess.py -d D --num_workers 32 --start_method spawn`
 - Tune shard flushing with `--shard_size` if needed:
-  - `python motif_preprocess.py -d D --num_workers 32 --shard_size 1000`
+  - `python motif_preprocess.py -d D --shard_size 1000`
 - The resulting cache files are saved in `data_files/{dataset}/motif_tokens/`.
 - Cache filenames now include a filter tag suffix (e.g., `_no003_012_102`) to prevent
   mixing with older caches.

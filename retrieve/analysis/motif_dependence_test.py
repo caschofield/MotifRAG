@@ -216,7 +216,6 @@ def _build_global_pool_rows(
     dataset_name: str,
     pool_splits: List[str],
     motif_top_k_tokens: int,
-    motif_backend: str,
 ):
     ids_chunks = []
     wts_chunks = []
@@ -227,7 +226,6 @@ def _build_global_pool_rows(
             dataset_name=dataset_name,
             split=split,
             top_k=motif_top_k_tokens,
-            backend=motif_backend,
         )
         for entry in tqdm(motif_dict.values(), desc=f"pool:{split}", unit="sample"):
             ids_rows = np.asarray(entry.get("triple_motif_token_ids", []), dtype=np.int16)
@@ -264,7 +262,6 @@ def _build_random_matrix_query_subgraph(
     dataset_name: str,
     split: str,
     motif_top_k_tokens: int,
-    motif_backend: str,
     random_k: int,
     excluded_token_ids: set,
     seed: int,
@@ -273,7 +270,6 @@ def _build_random_matrix_query_subgraph(
         dataset_name=dataset_name,
         split=split,
         top_k=motif_top_k_tokens,
-        backend=motif_backend,
     )
     rng = np.random.default_rng(seed)
     keep_idx = []
@@ -332,7 +328,6 @@ def _build_random_matrix_global_pool(
     dataset_name: str,
     pool_splits: List[str],
     motif_top_k_tokens: int,
-    motif_backend: str,
     random_k: int,
     excluded_token_ids: set,
     seed: int,
@@ -341,7 +336,6 @@ def _build_random_matrix_global_pool(
         dataset_name=dataset_name,
         pool_splits=pool_splits,
         motif_top_k_tokens=motif_top_k_tokens,
-        motif_backend=motif_backend,
     )
     rng = np.random.default_rng(seed)
     n_pool = pool_ids.shape[0]
@@ -477,7 +471,6 @@ def main(args):
             dataset_name=dataset_name,
             split=split,
             motif_top_k_tokens=args.motif_top_k_tokens,
-            motif_backend=args.motif_backend,
             random_k=args.top_k,
             excluded_token_ids=excluded_token_ids,
             seed=args.seed,
@@ -490,7 +483,6 @@ def main(args):
             dataset_name=dataset_name,
             pool_splits=pool_splits,
             motif_top_k_tokens=args.motif_top_k_tokens,
-            motif_backend=args.motif_backend,
             random_k=args.top_k,
             excluded_token_ids=excluded_token_ids,
             seed=args.seed,
@@ -516,7 +508,6 @@ def main(args):
         "q_emb_file": os.path.abspath(args.q_emb_file),
         "dataset": dataset_name,
         "split": split,
-        "motif_backend": args.motif_backend,
         "motif_top_k_tokens": int(args.motif_top_k_tokens),
         "top_k": int(args.top_k),
         "random_source": random_source,
@@ -560,7 +551,6 @@ if __name__ == "__main__":
     parser.add_argument("--q_emb_file", type=str, required=True, help="Path to emb/.../{split}.pth containing q_emb by sample id")
     parser.add_argument("--dataset", type=str, default="", choices=["", "webqsp", "cwq"], help="Dataset name for motif cache (auto-infer if omitted)")
     parser.add_argument("--split", type=str, default="", choices=["", "train", "val", "test"], help="Split name for query_subgraph random mode (auto-infer if omitted)")
-    parser.add_argument("--motif_backend", type=str, default="python", help="Motif cache backend tag")
     parser.add_argument("--motif_top_k_tokens", type=int, default=4, help="Motif top-k setting used in motif_preprocess")
     parser.add_argument("--top_k", type=int, default=100, help="K for retrieved triples and random candidate triples")
     parser.add_argument("--random_source", type=str, default="global_pool", choices=["global_pool", "query_subgraph"], help="Random baseline source")

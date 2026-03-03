@@ -29,27 +29,24 @@ class RetrieverDataset:
         motif_enabled = motif_cfg.get('enabled', False)
         if motif_enabled:
             top_k_tokens = motif_cfg.get('top_k_tokens', 4)
-            backend = motif_cfg.get('backend', 'python')
             try:
                 motif_dict = load_motif_cache(
                     dataset_name=dataset_name,
                     split=split,
                     top_k=top_k_tokens,
-                    backend=backend,
                 )
             except FileNotFoundError:
                 expected = motif_cache_file(
                     dataset_name=dataset_name,
                     split=split,
                     top_k=top_k_tokens,
-                    backend=backend,
                 )
                 raise FileNotFoundError(
                     "Motif cache missing while motif retrieval is enabled.\n"
                     f"Expected cache file: {expected}\n"
                     "Generate caches first, e.g.:\n"
                     f"python motif_preprocess.py -d {dataset_name} --splits train,val,test "
-                    f"--top_k_tokens {top_k_tokens} --backend {backend} --num_workers 32"
+                    f"--top_k_tokens {top_k_tokens}"
                 )
         else:
             motif_dict = None

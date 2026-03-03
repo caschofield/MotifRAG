@@ -17,8 +17,6 @@ retriever:
 
 motif:
   enabled: true
-  backend: 'python'
-  orca_path: ''
   top_k_tokens: 4
   motif_emb_dim: 64
   vocab_size: 17

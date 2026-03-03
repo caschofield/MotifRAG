@@ -19,8 +19,6 @@ class RetrieverYaml(pydantic.BaseModel):
 
 class MotifYaml(pydantic.BaseModel):
     enabled: bool = True
-    backend: str = 'python'
-    orca_path: str = ''
     top_k_tokens: int = 4
     motif_emb_dim: int = 64
     vocab_size: int = 17
