@@ -1,33 +1,21 @@
-# SubgraphRAG, Simple Yet Effective KG-Based RAG
+# MotifRAG, Motif-Aware KG-Based RAG
 
-[[Paper]](https://arxiv.org/abs/2410.20724)
+MotifRAG is a motif-aware extension of the SubgraphRAG retrieval pipeline for knowledge-graph question answering. It keeps the same two-stage retrieval and reasoning division, where the reasoning stage is unchanged from SubgraphRAG. In the retrieval stage, motif structural signals are added to improve retrieval accuracy.
 
-![model](framework_241104.png)
+## Acknowledgements
 
-## Table of Contents
+This project is built directly on the **SubgraphRAG** architecture, and reuses its core embedding, inference, and evaluation processes. 
 
-- [Usage](#usage)
-- [Citation](#citation)
-- [Frequently Asked Questions (FQA)](#frequently-asked-questions-fqa)
+- SubgraphRAG paper: [https://arxiv.org/abs/2410.20724](https://arxiv.org/abs/2410.20724)  
+- SubgraphRAG code: [https://github.com/Graph-COM/SubgraphRAG](https://github.com/Graph-COM/SubgraphRAG)
 
-## Usage
+We would like to thank Li et al. for the foundation for this work.
 
-SubgraphRAG is a retrieval-and-reasoning pipeline for knowledge-graph-based retrieval-augmented generation. 
+## Changes in MotifRAG
 
-1. For the retrieval stage, see [the retrieve folder](./retrieve/).
-2. For the reasoning stage, see [the reason folder](./reason/).
+Compared to the baseline retriever from SubgraphRAG, MotifRAG adds:
+- **Motif counting** to find the top-$k$ motifs that each triple belongs to.
+- **Motif representations** of triples using a weighted average of motif embeddings.
+- **Multi-channel architecture** used by retriever to provide query-level weighting of different signals (the lexical neighborhood, positional encodings, and motif structural signals).
 
-## Frequently Asked Questions (FQA)
-
-We welcome your feedback and sincerely appreciate your time! If you encounter bugs or have feature requests, you may [open an issue](../../issues/new) or email us at `{mufei.li, siqi.miao}@gatech.edu`. Your input helps us improve and better serve the community!
-
-## Citation
-
-```tex
-@inproceedings{li2024subgraphrag,
-    title={Simple is Effective: The Roles of Graphs and Large Language Models in Knowledge-Graph-Based Retrieval-Augmented Generation},
-    author={Li, Mufei and Miao, Siqi and Li, Pan},
-    booktitle={International Conference on Learning Representations},
-    year={2025}
-}
-```
+The code also includes analysis utilities for inspecting the significance of motifs in retrieved triples.
