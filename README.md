@@ -14,7 +14,7 @@ We would like to thank Li et al. for the foundation for this work.
 ## Changes in MotifRAG
 
 Compared to the baseline retriever from SubgraphRAG, MotifRAG adds:
-- **Motif counting** to find the top-$k$ motifs that each triple belongs to.
+- **Motif counting** to find the top-*k* motifs that each triple belongs to.
 - **Motif representations** of triples using a weighted average of motif embeddings.
 - **Multi-channel architecture** used by retriever to provide query-level weighting of different signals (the lexical neighborhood, positional encodings, and motif structural signals).
 
