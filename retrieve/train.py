@@ -26,13 +26,11 @@ def eval_epoch(config, device, data_loader, model):
     for sample in tqdm(data_loader):
         h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,\
         num_non_text_entities, relation_embs, topic_entity_one_hot,\
-        target_triple_probs, a_entity_id_list, node_motif_token_ids,\
-        node_motif_token_wts, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
+        target_triple_probs, a_entity_id_list, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
 
         pred_triple_logits = model(
             h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,
             num_non_text_entities, relation_embs, topic_entity_one_hot,
-            node_motif_token_ids, node_motif_token_wts,
             triple_motif_token_ids, triple_motif_token_wts).reshape(-1)
         
         # Triple ranking
@@ -94,8 +92,7 @@ def train_epoch(device, train_loader, model, optimizer):
     for sample in tqdm(train_loader):
         h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,\
         num_non_text_entities, relation_embs, topic_entity_one_hot,\
-        target_triple_probs, a_entity_id_list, node_motif_token_ids,\
-        node_motif_token_wts, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
+        target_triple_probs, a_entity_id_list, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
             
         if len(h_id_tensor) == 0:
             continue
@@ -103,7 +100,6 @@ def train_epoch(device, train_loader, model, optimizer):
         model_out = model(
             h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,
             num_non_text_entities, relation_embs, topic_entity_one_hot,
-            node_motif_token_ids, node_motif_token_wts,
             triple_motif_token_ids, triple_motif_token_wts,
             return_aux=True)
         if isinstance(model_out, tuple):

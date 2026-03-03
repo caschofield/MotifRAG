@@ -74,15 +74,8 @@ def _sanitize_token_lists(token_ids: List[int], token_wts: List[float], top_k: i
 
 
 def _sanitize_motif_entry(entry: Dict[str, Any], top_k: int):
-    node_ids = entry.get("node_motif_token_ids", [])
-    node_wts = entry.get("node_motif_token_wts", [])
     triple_ids = entry.get("triple_motif_token_ids", [])
     triple_wts = entry.get("triple_motif_token_wts", [])
-
-    for i in range(len(node_ids)):
-        ids_i, wts_i = _sanitize_token_lists(node_ids[i], node_wts[i], top_k)
-        node_ids[i] = ids_i
-        node_wts[i] = wts_i
 
     for i in range(len(triple_ids)):
         ids_i, wts_i = _sanitize_token_lists(triple_ids[i], triple_wts[i], top_k)
@@ -181,8 +174,6 @@ def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4) -> Dict:
 
     pair_counter_cache = {}
     triple_counters = [None for _ in range(num_triples)]
-    node_counters = [Counter() for _ in range(num_entities)]
-
     for (h_i, t_i), triple_ids in pair_to_triple_ids.items():
         pair_key = (h_i, t_i)
         if pair_key not in pair_counter_cache:
@@ -194,21 +185,8 @@ def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4) -> Dict:
                 any_adj=any_adj,
             )
         counter = pair_counter_cache[pair_key]
-        multiplicity = len(triple_ids)
-
-        for token_id, count in counter.items():
-            add_count = count * multiplicity
-            node_counters[h_i][token_id] += add_count
-            node_counters[t_i][token_id] += add_count
         for triple_id in triple_ids:
             triple_counters[triple_id] = counter
-
-    node_ids = [[0 for _ in range(top_k)] for _ in range(num_entities)]
-    node_wts = [[0.0 for _ in range(top_k)] for _ in range(num_entities)]
-    for node_id in range(num_entities):
-        ids_i, wts_i = _counter_to_topk(node_counters[node_id], top_k)
-        node_ids[node_id] = ids_i
-        node_wts[node_id] = wts_i
 
     triple_ids = [[0 for _ in range(top_k)] for _ in range(num_triples)]
     triple_wts = [[0.0 for _ in range(top_k)] for _ in range(num_triples)]
@@ -221,8 +199,6 @@ def build_motif_tokens_for_sample(sample: Dict, top_k: int = 4) -> Dict:
         triple_wts[triple_id] = wts_i
 
     entry = {
-        "node_motif_token_ids": node_ids,
-        "node_motif_token_wts": node_wts,
         "triple_motif_token_ids": triple_ids,
         "triple_motif_token_wts": triple_wts,
     }

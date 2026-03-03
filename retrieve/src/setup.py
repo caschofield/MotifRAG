@@ -15,8 +15,7 @@ def set_seed(seed):
 def prepare_sample(device, sample):
     h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,\
         num_non_text_entities, relation_embs, topic_entity_one_hot,\
-        target_triple_probs, a_entity_id_list, node_motif_token_ids,\
-        node_motif_token_wts, triple_motif_token_ids, triple_motif_token_wts = sample
+        target_triple_probs, a_entity_id_list, triple_motif_token_ids, triple_motif_token_wts = sample
 
     h_id_tensor = h_id_tensor.to(device)
     r_id_tensor = r_id_tensor.to(device)
@@ -25,12 +24,9 @@ def prepare_sample(device, sample):
     entity_embs = entity_embs.to(device)
     relation_embs = relation_embs.to(device)
     topic_entity_one_hot = topic_entity_one_hot.to(device)
-    node_motif_token_ids = node_motif_token_ids.to(device)
-    node_motif_token_wts = node_motif_token_wts.to(device)
     triple_motif_token_ids = triple_motif_token_ids.to(device)
     triple_motif_token_wts = triple_motif_token_wts.to(device)
     
     return h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,\
         num_non_text_entities, relation_embs, topic_entity_one_hot,\
-        target_triple_probs, a_entity_id_list, node_motif_token_ids,\
-        node_motif_token_wts, triple_motif_token_ids, triple_motif_token_wts
+        target_triple_probs, a_entity_id_list, triple_motif_token_ids, triple_motif_token_wts

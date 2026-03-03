@@ -35,8 +35,7 @@ def main(args):
         sample = collate_retriever([raw_sample])
         h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,\
             num_non_text_entities, relation_embs, topic_entity_one_hot,\
-            target_triple_probs, a_entity_id_list, node_motif_token_ids,\
-            node_motif_token_wts, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
+            target_triple_probs, a_entity_id_list, triple_motif_token_ids, triple_motif_token_wts = prepare_sample(device, sample)
 
         entity_list = raw_sample['text_entity_list'] + raw_sample['non_text_entity_list']
         relation_list = raw_sample['relation_list']
@@ -49,7 +48,6 @@ def main(args):
             pred_triple_logits = model(
                 h_id_tensor, r_id_tensor, t_id_tensor, q_emb, entity_embs,
                 num_non_text_entities, relation_embs, topic_entity_one_hot,
-                node_motif_token_ids, node_motif_token_wts,
                 triple_motif_token_ids, triple_motif_token_wts)
             pred_triple_scores = torch.sigmoid(pred_triple_logits).reshape(-1)
             top_K_results = torch.topk(pred_triple_scores, 

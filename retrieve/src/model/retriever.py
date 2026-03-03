@@ -123,8 +123,6 @@ class Retriever(nn.Module):
         num_non_text_entities,
         relation_embs,
         topic_entity_one_hot,
-        node_motif_token_ids=None,
-        node_motif_token_wts=None,
         triple_motif_token_ids=None,
         triple_motif_token_wts=None,
         return_aux=False,
@@ -170,13 +168,10 @@ class Retriever(nn.Module):
                 return pred, {}
             return pred
 
-        node_motif_emb = self._aggregate_motif_emb(node_motif_token_ids, node_motif_token_wts)
         triple_motif_emb = self._aggregate_motif_emb(triple_motif_token_ids, triple_motif_token_wts)
 
         h_h = h_e[h_id_tensor]
         h_t = h_e[t_id_tensor]
-        #m_h = node_motif_emb[h_id_tensor]
-        #m_t = node_motif_emb[t_id_tensor]
         h_neighborhood = self.neighborhood_head(torch.cat([h_h, h_t], dim=1))
 
         pos_node_features = []

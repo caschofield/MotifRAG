@@ -258,19 +258,11 @@ class RetrieverDataset:
             num_triples_i = len(sample_i['h_id_list'])
             if motif_dict is not None and sample_i_id in motif_dict:
                 motif_entry = motif_dict[sample_i_id]
-                sample_i['node_motif_token_ids'] = torch.tensor(
-                    motif_entry['node_motif_token_ids'], dtype=torch.long)
-                sample_i['node_motif_token_wts'] = torch.tensor(
-                    motif_entry['node_motif_token_wts'], dtype=torch.float)
                 sample_i['triple_motif_token_ids'] = torch.tensor(
                     motif_entry['triple_motif_token_ids'], dtype=torch.long)
                 sample_i['triple_motif_token_wts'] = torch.tensor(
                     motif_entry['triple_motif_token_wts'], dtype=torch.float)
             else:
-                sample_i['node_motif_token_ids'] = torch.zeros(
-                    (num_entities_i, top_k_motif_tokens), dtype=torch.long)
-                sample_i['node_motif_token_wts'] = torch.zeros(
-                    (num_entities_i, top_k_motif_tokens), dtype=torch.float)
                 sample_i['triple_motif_token_ids'] = torch.zeros(
                     (num_triples_i, top_k_motif_tokens), dtype=torch.long)
                 sample_i['triple_motif_token_wts'] = torch.zeros(
@@ -317,5 +309,4 @@ def collate_retriever(data):
     return h_id_tensor, r_id_tensor, t_id_tensor, sample['q_emb'],\
         sample['entity_embs'], num_non_text_entities, sample['relation_embs'],\
         sample['topic_entity_one_hot'], sample['target_triple_probs'], sample['a_entity_id_list'],\
-        sample['node_motif_token_ids'], sample['node_motif_token_wts'],\
         sample['triple_motif_token_ids'], sample['triple_motif_token_wts']
