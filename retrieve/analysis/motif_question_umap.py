@@ -1,5 +1,4 @@
 import argparse
-import json
 import math
 import os
 from typing import Dict, List, Tuple
@@ -239,12 +238,12 @@ def main(args):
     print(f"Loading checkpoint: {args.checkpoint}")
     checkpoint = _torch_load(args.checkpoint)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    motif_key, motif_weight = _find_motif_weight(state_dict)
+    _, motif_weight = _find_motif_weight(state_dict)
     motif_table = motif_weight.detach().cpu().numpy().astype(np.float32)
     del checkpoint
 
     token_ids, anchor_names, anchor_vecs = _collect_anchor_embeddings(motif_table)
-    anchor_xy, used_neighbors = _run_anchor_umap(
+    anchor_xy, _ = _run_anchor_umap(
         anchor_vecs,
         n_neighbors=args.n_neighbors,
         min_dist=args.min_dist,
@@ -283,38 +282,7 @@ def main(args):
         anchor_xy=anchor_xy,
     )
 
-    meta = {
-        "checkpoint": os.path.abspath(args.checkpoint),
-        "retrieval_result": os.path.abspath(args.retrieval_result),
-        "motif_weight_key": motif_key,
-        "num_selected_questions": int(len(selected)),
-        "top_k": int(args.top_k),
-        "min_points": int(args.min_points),
-        "fit_basis": "motif_anchors_only",
-        "umap": {
-            "n_neighbors": int(args.n_neighbors),
-            "n_neighbors_used": int(used_neighbors),
-            "min_dist": float(args.min_dist),
-            "metric": str(args.metric),
-            "seed": int(args.seed),
-        },
-        "projected_anchor_triad_names": anchor_names,
-        "selected_questions": [
-            {
-                "sample_id": item["sample_id"],
-                "question": item["question"],
-                "num_points": int(item["xy"].shape[0]),
-            }
-            for item in selected
-        ],
-        "output_png": os.path.abspath(out_png),
-    }
-    out_json = os.path.join(args.output_dir, "question_topk_motif_umap.json")
-    with open(out_json, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-
     print(f"Saved plot: {out_png}")
-    print(f"Saved metadata: {out_json}")
 
 
 if __name__ == "__main__":
